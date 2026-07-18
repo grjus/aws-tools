@@ -11,6 +11,7 @@ from aws_tools.cloudformation import (
 from aws_tools.config import AppConfig, ResourceIdentity
 from aws_tools.models import (
     Confidence,
+    CleanupAction,
     Finding,
     Report,
     Risk,
@@ -106,6 +107,7 @@ def _finding(
         ownership,
         config,
     )
+    cleanup_action = _cleanup_action(resource, ownership, config)
     return Finding(
         id=stable_finding_id(
             TOOL,
@@ -127,6 +129,8 @@ def _finding(
         evidence=evidence,
         risk=risk,
         confidence=confidence,
+        cleanup_eligible=cleanup_action is not None,
+        cleanup_action=cleanup_action,
         recommendation=recommendation,
     )
 
@@ -167,10 +171,46 @@ def _classification(
         )
     return (
         ["No CloudFormation physical resource ID or stack tag found"],
-        Risk.MEDIUM,
+        _orphan_risk(resource),
         Confidence.MEDIUM,
-        "Review ownership before cleanup",
+        _orphan_recommendation(resource),
     )
+
+
+def _cleanup_action(
+    resource: ResourceIdentity,
+    ownership: dict[str, StackOwnership],
+    config: AppConfig,
+) -> CleanupAction | None:
+    if not _is_orphan_candidate(resource, ownership, config):
+        return None
+    if resource.service == "logs" and resource.resource_type == "log-group":
+        return CleanupAction(
+            name="logs.delete_log_group",
+            parameters={"log_group_name": resource.resource_id},
+        )
+    if resource.service == "s3" and resource.resource_type == "bucket":
+        return CleanupAction(
+            name="s3.delete_bucket_if_empty",
+            parameters={"bucket_name": resource.resource_id},
+        )
+    return None
+
+
+def _orphan_risk(resource: ResourceIdentity) -> Risk:
+    if resource.service == "logs":
+        return Risk.LOW
+    if resource.service == "s3":
+        return Risk.HIGH
+    return Risk.MEDIUM
+
+
+def _orphan_recommendation(resource: ResourceIdentity) -> str:
+    if resource.service == "logs":
+        return "Delete orphaned log group if logs are no longer needed"
+    if resource.service == "s3":
+        return "Delete only after bucket state checks confirm it is empty"
+    return "Review ownership before cleanup"
 
 
 def _ec2_resources(context: AwsContext, region: str) -> list[ResourceIdentity]:

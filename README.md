@@ -42,6 +42,7 @@ aws-tools tag-compliance scan
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id>
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids ALL
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id> --execute
+aws-tools cleanup apply --report .aws-tools/reports/<orphaned-report>.json --ids ALL --execute
 ```
 
 Scans print a console report and write JSON reports under
@@ -50,6 +51,13 @@ provided, and cleanup actions must reference explicit finding IDs from a
 generated report. Use `--ids ALL` to select every cleanup-eligible finding from
 the report. Findings without a supported cleanup action are never applied by
 `ALL`.
+
+The orphaned scanner currently emits destructive cleanup actions for orphaned
+CloudWatch log groups and S3 buckets. Log group cleanup calls
+`logs.delete_log_group`. S3 bucket cleanup calls `s3.delete_bucket` only after
+state checks confirm the bucket exists, is not versioned, has no object lock,
+has no replication configuration, and has no objects, versions, or delete
+markers. The tool does not empty buckets.
 
 Use `--filter` on scan commands to keep only services you care about in the
 console output and saved JSON report. A filter can be a service such as `logs`,
