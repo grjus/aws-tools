@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from botocore.exceptions import BotoCoreError, ClientError
+from rich.console import Console
+
+from aws_tools.aws import create_context
+from aws_tools.cleanup import CleanupError, apply_findings
+from aws_tools.config import load_config
+from aws_tools.filtering import apply_report_filters
+from aws_tools.render import render_report
+from aws_tools.reports import default_report_path
+from aws_tools.scanners import cost_risk, logs_retention, orphaned, tag_compliance
+
+
+console = Console()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "handler"):
+        parser.print_help()
+        return 1
+    try:
+        return args.handler(args)
+    except (BotoCoreError, ClientError) as exc:
+        console.print(f"[red]AWS request failed:[/red] {exc}")
+        return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aws-tools",
+        description="AWS resource reporting and guarded cleanup tools.",
+    )
+    parser.add_argument("--profile", help="AWS profile override.")
+    parser.add_argument(
+        "--regions",
+        help="Comma-separated AWS regions override.",
+    )
+    parser.add_argument(
+        "--read-only-role-arn",
+        help="Read-only IAM role ARN to assume for scan commands.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    _add_scan_command(subparsers, "orphaned", _handle_orphaned_scan)
+    _add_scan_command(subparsers, "logs-retention", _handle_logs_scan)
+    _add_scan_command(subparsers, "cost-risk", _handle_cost_scan)
+    _add_scan_command(subparsers, "tag-compliance", _handle_tag_scan)
+    _add_cleanup_command(subparsers)
+    _add_roadmap_command(subparsers)
+    return parser
+
+
+def _add_scan_command(subparsers, name: str, handler) -> None:
+    parser = subparsers.add_parser(name)
+    nested = parser.add_subparsers(dest="action")
+    scan = nested.add_parser("scan")
+    scan.add_argument("--output", type=Path, help="JSON report output path.")
+    scan.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Render results without writing a report file.",
+    )
+    scan.add_argument(
+        "--filter",
+        action="append",
+        help=(
+            "Filter findings by service or service:resource-type. "
+            "Can be repeated or comma-separated."
+        ),
+    )
+    if name == "orphaned":
+        scan.add_argument(
+            "--include-managed",
+            action="store_true",
+            help="Include resources classified as managed or excluded.",
+        )
+    scan.set_defaults(handler=handler)
+
+
+def _add_cleanup_command(subparsers) -> None:
+    parser = subparsers.add_parser("cleanup")
+    nested = parser.add_subparsers(dest="action")
+    apply_parser = nested.add_parser("apply")
+    apply_parser.add_argument("--report", type=Path, required=True)
+    apply_parser.add_argument(
+        "--ids",
+        required=True,
+        help="Comma-separated finding IDs, or ALL for every cleanup-eligible finding.",
+    )
+    apply_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Apply actions. Omit for dry-run.",
+    )
+    apply_parser.set_defaults(handler=_handle_cleanup_apply)
+
+
+def _add_roadmap_command(subparsers) -> None:
+    parser = subparsers.add_parser("roadmap")
+    parser.set_defaults(handler=_handle_roadmap)
+
+
+def _handle_orphaned_scan(args) -> int:
+    config, context = _context(args)
+    report = orphaned.scan(
+        context,
+        config,
+        include_managed=args.include_managed,
+    )
+    return _finish_scan(config, report, args)
+
+
+def _handle_logs_scan(args) -> int:
+    config, context = _context(args)
+    report = logs_retention.scan(context, config)
+    return _finish_scan(config, report, args)
+
+
+def _handle_cost_scan(args) -> int:
+    config, context = _context(args)
+    report = cost_risk.scan(context)
+    return _finish_scan(config, report, args)
+
+
+def _handle_tag_scan(args) -> int:
+    config, context = _context(args)
+    report = tag_compliance.scan(context, config)
+    return _finish_scan(config, report, args)
+
+
+def _handle_cleanup_apply(args) -> int:
+    finding_ids = [item.strip() for item in args.ids.split(",") if item.strip()]
+    context = None
+    if args.execute:
+        _, context = _context(args, assume_read_only_role=False)
+    try:
+        messages = apply_findings(
+            context=context,
+            report_path=args.report,
+            finding_ids=finding_ids,
+            execute=args.execute,
+        )
+    except CleanupError as exc:
+        console.print(f"[red]Cleanup failed:[/red] {exc}")
+        return 2
+    for message in messages:
+        console.print(message)
+    return 0
+
+
+def _handle_roadmap(args) -> int:
+    del args
+    console.print("[bold]Planned tools[/bold]")
+    for item in [
+        "orphaned scan",
+        "logs-retention scan/apply",
+        "cost-risk scan",
+        "tag-compliance scan",
+        "security group cleanup",
+        "s3 hygiene",
+        "iam access key audit",
+        "ami and snapshot cleanup",
+        "vpc networking audit",
+        "cloudformation stack health",
+    ]:
+        console.print(f"- {item}")
+    return 0
+
+
+def _finish_scan(config, report, args) -> int:
+    report = apply_report_filters(report, args.filter)
+    path = None
+    if not args.no_save:
+        path = args.output or default_report_path(config, report.tool)
+        report.write_json(path)
+    render_report(report, path)
+    return 0
+
+
+def _context(args, assume_read_only_role: bool = True):
+    regions = None
+    if args.regions:
+        regions = [
+            region.strip() for region in args.regions.split(",") if region.strip()
+        ]
+    config = load_config(
+        profile=args.profile,
+        regions=regions,
+        read_only_role_arn=args.read_only_role_arn,
+    )
+    return config, create_context(
+        config,
+        assume_read_only_role=assume_read_only_role,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
