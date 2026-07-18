@@ -96,6 +96,69 @@ class CoreContractTest(unittest.TestCase):
                     execute=False,
                 )
 
+    def test_delete_log_group_cleanup_executes_delete(self):
+        finding = _orphaned_log_group_finding()
+        context = AwsContext(
+            session=None,
+            account_id="123456789012",
+            profile="dev",
+            regions=["eu-west-1"],
+        )
+        logs = FakeLogsClient()
+
+        with patch("aws_tools.cleanup.client", return_value=logs):
+            message = apply_findings_from_report(
+                context,
+                [finding],
+                ["orphaned-log-group"],
+                True,
+            )[0]
+
+        self.assertEqual(message, "APPLIED orphaned-log-group: log group deleted")
+        self.assertEqual(logs.deleted, ["/aws/lambda/orphaned"])
+
+    def test_delete_empty_bucket_cleanup_executes_delete(self):
+        finding = _orphaned_bucket_finding()
+        context = AwsContext(
+            session=None,
+            account_id="123456789012",
+            profile="dev",
+            regions=["eu-west-1"],
+        )
+        s3 = FakeDeleteBucketClient()
+
+        with patch("aws_tools.cleanup.client", return_value=s3):
+            message = apply_findings_from_report(
+                context,
+                [finding],
+                ["orphaned-bucket"],
+                True,
+            )[0]
+
+        self.assertEqual(message, "APPLIED orphaned-bucket: bucket deleted")
+        self.assertEqual(s3.deleted, ["orphaned-bucket"])
+
+    def test_delete_bucket_refuses_non_empty_bucket(self):
+        finding = _orphaned_bucket_finding()
+        context = AwsContext(
+            session=None,
+            account_id="123456789012",
+            profile="dev",
+            regions=["eu-west-1"],
+        )
+        s3 = FakeDeleteBucketClient(key_count=1)
+
+        with patch("aws_tools.cleanup.client", return_value=s3):
+            with self.assertRaises(CleanupError):
+                apply_findings_from_report(
+                    context,
+                    [finding],
+                    ["orphaned-bucket"],
+                    True,
+                )
+
+        self.assertEqual(s3.deleted, [])
+
     def test_log_retention_days_are_validated(self):
         with self.assertRaises(ValidationError):
             AppConfig(log_retention_days=2)
@@ -279,6 +342,41 @@ class CoreContractTest(unittest.TestCase):
             ],
         )
 
+    def test_orphaned_log_group_has_delete_action(self):
+        finding = orphaned._finding(
+            _context(),
+            AppConfig(),
+            "eu-west-1",
+            orphaned.ResourceIdentity(
+                service="logs",
+                resource_type="log-group",
+                resource_id="/aws/lambda/orphaned",
+            ),
+            {},
+        )
+
+        self.assertTrue(finding.cleanup_eligible)
+        self.assertEqual(finding.cleanup_action.name, "logs.delete_log_group")
+
+    def test_orphaned_bucket_has_guarded_delete_action(self):
+        finding = orphaned._finding(
+            _context(),
+            AppConfig(),
+            "global",
+            orphaned.ResourceIdentity(
+                service="s3",
+                resource_type="bucket",
+                resource_id="orphaned-bucket",
+            ),
+            {},
+        )
+
+        self.assertTrue(finding.cleanup_eligible)
+        self.assertEqual(
+            finding.cleanup_action.name,
+            "s3.delete_bucket_if_empty",
+        )
+
 
 def _logs_finding() -> Finding:
     return Finding(
@@ -298,6 +396,42 @@ def _logs_finding() -> Finding:
             },
         ),
         recommendation="Set retention",
+    )
+
+
+def _orphaned_log_group_finding() -> Finding:
+    return Finding(
+        id="orphaned-log-group",
+        tool="orphaned",
+        account_id="123456789012",
+        region="eu-west-1",
+        service="logs",
+        resource_type="log-group",
+        resource_id="/aws/lambda/orphaned",
+        cleanup_eligible=True,
+        cleanup_action=CleanupAction(
+            name="logs.delete_log_group",
+            parameters={"log_group_name": "/aws/lambda/orphaned"},
+        ),
+        recommendation="Delete orphaned log group",
+    )
+
+
+def _orphaned_bucket_finding() -> Finding:
+    return Finding(
+        id="orphaned-bucket",
+        tool="orphaned",
+        account_id="123456789012",
+        region="global",
+        service="s3",
+        resource_type="bucket",
+        resource_id="orphaned-bucket",
+        cleanup_eligible=True,
+        cleanup_action=CleanupAction(
+            name="s3.delete_bucket_if_empty",
+            parameters={"bucket_name": "orphaned-bucket"},
+        ),
+        recommendation="Delete empty orphaned bucket",
     )
 
 
@@ -336,6 +470,27 @@ def _stack_owner(resource_id: str) -> StackOwnership:
         resource_type="AWS::CloudFront::Distribution",
         region="eu-west-1",
     )
+
+
+def _context() -> AwsContext:
+    return AwsContext(
+        session=None,
+        account_id="123456789012",
+        profile="dev",
+        regions=["eu-west-1"],
+    )
+
+
+def apply_findings_from_report(
+    context: AwsContext | None,
+    findings: list[Finding],
+    finding_ids: list[str],
+    execute: bool,
+) -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "report.json"
+        Report(tool="test", findings=findings).write_json(path)
+        return apply_findings(context, path, finding_ids, execute)
 
 
 class FakeEc2Client:
@@ -432,6 +587,57 @@ class FakeCloudFrontPaginator:
                 }
             }
         ]
+
+
+class FakeLogsClient:
+    def __init__(self):
+        self.deleted = []
+
+    def describe_log_groups(self, logGroupNamePrefix, limit):
+        del limit
+        return {"logGroups": [{"logGroupName": logGroupNamePrefix}]}
+
+    def delete_log_group(self, logGroupName):
+        self.deleted.append(logGroupName)
+
+
+class FakeDeleteBucketClient:
+    class exceptions:
+        class ObjectLockConfigurationNotFoundError(Exception):
+            pass
+
+        class ReplicationConfigurationNotFoundError(Exception):
+            pass
+
+    def __init__(self, key_count: int = 0):
+        self.key_count = key_count
+        self.deleted = []
+
+    def head_bucket(self, Bucket):
+        del Bucket
+
+    def get_bucket_versioning(self, Bucket):
+        del Bucket
+        return {}
+
+    def get_object_lock_configuration(self, Bucket):
+        del Bucket
+        raise self.exceptions.ObjectLockConfigurationNotFoundError()
+
+    def get_bucket_replication(self, Bucket):
+        del Bucket
+        raise self.exceptions.ReplicationConfigurationNotFoundError()
+
+    def list_objects_v2(self, Bucket, MaxKeys):
+        del Bucket, MaxKeys
+        return {"KeyCount": self.key_count}
+
+    def list_object_versions(self, Bucket, MaxKeys):
+        del Bucket, MaxKeys
+        return {}
+
+    def delete_bucket(self, Bucket):
+        self.deleted.append(Bucket)
 
 
 if __name__ == "__main__":

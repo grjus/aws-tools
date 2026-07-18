@@ -81,6 +81,28 @@ def _apply_finding(
         )
         return f"APPLIED {finding.id}: retention policy updated"
 
+    if action.name == "logs.delete_log_group":
+        params = action.parameters
+        if not execute:
+            return f"DRY-RUN {finding.id}: delete log group {params['log_group_name']}"
+        if context is None:
+            raise CleanupError("AWS context is required when --execute is set")
+        logs = client(context, "logs", finding.region)
+        _require_log_group(logs, params["log_group_name"])
+        logs.delete_log_group(logGroupName=params["log_group_name"])
+        return f"APPLIED {finding.id}: log group deleted"
+
+    if action.name == "s3.delete_bucket_if_empty":
+        params = action.parameters
+        if not execute:
+            return f"DRY-RUN {finding.id}: delete empty bucket {params['bucket_name']}"
+        if context is None:
+            raise CleanupError("AWS context is required when --execute is set")
+        s3 = client(context, "s3")
+        _require_bucket_safe_to_delete(s3, params["bucket_name"])
+        s3.delete_bucket(Bucket=params["bucket_name"])
+        return f"APPLIED {finding.id}: bucket deleted"
+
     raise CleanupError(f"Unsupported cleanup action: {action.name}")
 
 
@@ -90,3 +112,49 @@ def _require_log_group(logs, name: str) -> None:
         if group.get("logGroupName") == name:
             return
     raise CleanupError(f"Log group no longer exists: {name}")
+
+
+def _require_bucket_safe_to_delete(s3, bucket_name: str) -> None:
+    _require_bucket_exists(s3, bucket_name)
+    _require_bucket_not_versioned(s3, bucket_name)
+    _require_bucket_without_object_lock(s3, bucket_name)
+    _require_bucket_without_replication(s3, bucket_name)
+    _require_bucket_empty(s3, bucket_name)
+
+
+def _require_bucket_exists(s3, bucket_name: str) -> None:
+    s3.head_bucket(Bucket=bucket_name)
+
+
+def _require_bucket_not_versioned(s3, bucket_name: str) -> None:
+    versioning = s3.get_bucket_versioning(Bucket=bucket_name)
+    status = versioning.get("Status")
+    if status in {"Enabled", "Suspended"}:
+        raise CleanupError(f"Bucket has versioning {status}: {bucket_name}")
+    if versioning.get("MFADelete"):
+        raise CleanupError(f"Bucket has MFA delete configured: {bucket_name}")
+
+
+def _require_bucket_without_object_lock(s3, bucket_name: str) -> None:
+    try:
+        s3.get_object_lock_configuration(Bucket=bucket_name)
+    except s3.exceptions.ObjectLockConfigurationNotFoundError:
+        return
+    raise CleanupError(f"Bucket has object lock configured: {bucket_name}")
+
+
+def _require_bucket_without_replication(s3, bucket_name: str) -> None:
+    try:
+        s3.get_bucket_replication(Bucket=bucket_name)
+    except s3.exceptions.ReplicationConfigurationNotFoundError:
+        return
+    raise CleanupError(f"Bucket has replication configured: {bucket_name}")
+
+
+def _require_bucket_empty(s3, bucket_name: str) -> None:
+    response = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+    if response.get("KeyCount", 0) > 0:
+        raise CleanupError(f"Bucket is not empty: {bucket_name}")
+    versions = s3.list_object_versions(Bucket=bucket_name, MaxKeys=1)
+    if versions.get("Versions") or versions.get("DeleteMarkers"):
+        raise CleanupError(f"Bucket has object versions/delete markers: {bucket_name}")
