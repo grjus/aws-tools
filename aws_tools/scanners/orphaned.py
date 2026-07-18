@@ -78,6 +78,10 @@ def _regional_findings(
     resources.extend(_rds_resources(context, region))
     resources.extend(_lambda_resources(context, region))
     resources.extend(_logs_resources(context, region))
+    resources.extend(_dynamodb_resources(context, region))
+    resources.extend(_opensearch_serverless_resources(context, region))
+    resources.extend(_bedrock_resources(context, region))
+    resources.extend(_sagemaker_resources(context, region))
     return [
         _finding(context, config, region, resource, ownership)
         for resource in resources
@@ -362,6 +366,145 @@ def _logs_resources(context: AwsContext, region: str) -> list[ResourceIdentity]:
     except ClientError:
         return resources
     return resources
+
+
+def _dynamodb_resources(
+    context: AwsContext,
+    region: str,
+) -> list[ResourceIdentity]:
+    dynamodb = client(context, "dynamodb", region)
+    resources: list[ResourceIdentity] = []
+    try:
+        paginator = dynamodb.get_paginator("list_tables")
+        for page in paginator.paginate():
+            for table_name in page.get("TableNames", []):
+                table = dynamodb.describe_table(TableName=table_name)["Table"]
+                resources.append(
+                    ResourceIdentity(
+                        service="dynamodb",
+                        resource_type="table",
+                        resource_id=table_name,
+                        arn=table.get("TableArn"),
+                        name=table_name,
+                    )
+                )
+    except ClientError:
+        return resources
+    return resources
+
+
+def _opensearch_serverless_resources(
+    context: AwsContext,
+    region: str,
+) -> list[ResourceIdentity]:
+    aoss = client(context, "opensearchserverless", region)
+    resources: list[ResourceIdentity] = []
+    try:
+        for collection in aoss.list_collections().get("collectionSummaries", []):
+            resources.append(
+                ResourceIdentity(
+                    service="opensearchserverless",
+                    resource_type="collection",
+                    resource_id=collection["id"],
+                    arn=collection.get("arn"),
+                    name=collection.get("name"),
+                )
+            )
+    except ClientError:
+        return resources
+    return resources
+
+
+def _bedrock_resources(context: AwsContext, region: str) -> list[ResourceIdentity]:
+    bedrock = client(context, "bedrock-agent", region)
+    resources: list[ResourceIdentity] = []
+    try:
+        paginator = bedrock.get_paginator("list_knowledge_bases")
+        for page in paginator.paginate():
+            for kb in page.get("knowledgeBaseSummaries", []):
+                resources.append(
+                    ResourceIdentity(
+                        service="bedrock-agent",
+                        resource_type="knowledge-base",
+                        resource_id=kb["knowledgeBaseId"],
+                        name=kb.get("name"),
+                    )
+                )
+    except ClientError:
+        return resources
+    return resources
+
+
+def _sagemaker_resources(
+    context: AwsContext,
+    region: str,
+) -> list[ResourceIdentity]:
+    sagemaker = client(context, "sagemaker", region)
+    resources: list[ResourceIdentity] = []
+    try:
+        for resource_type in _SAGEMAKER_LIST_OPERATIONS:
+            resources.extend(_sagemaker_named_resources(sagemaker, resource_type))
+    except ClientError:
+        return resources
+    return resources
+
+
+def _sagemaker_named_resources(sagemaker, resource_type: str) -> list[ResourceIdentity]:
+    operation, key, id_key, arn_key = _SAGEMAKER_LIST_OPERATIONS[resource_type]
+    resources: list[ResourceIdentity] = []
+    paginator = sagemaker.get_paginator(operation)
+    for page in paginator.paginate():
+        for item in page.get(key, []):
+            resource_id = item[id_key]
+            resources.append(
+                ResourceIdentity(
+                    service="sagemaker",
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    arn=item.get(arn_key),
+                    name=resource_id,
+                )
+            )
+    return resources
+
+
+_SAGEMAKER_LIST_OPERATIONS = {
+    "notebook-instance": (
+        "list_notebook_instances",
+        "NotebookInstances",
+        "NotebookInstanceName",
+        "NotebookInstanceArn",
+    ),
+    "endpoint": ("list_endpoints", "Endpoints", "EndpointName", "EndpointArn"),
+    "model": ("list_models", "Models", "ModelName", "ModelArn"),
+    "training-job": (
+        "list_training_jobs",
+        "TrainingJobSummaries",
+        "TrainingJobName",
+        "TrainingJobArn",
+    ),
+    "processing-job": (
+        "list_processing_jobs",
+        "ProcessingJobSummaries",
+        "ProcessingJobName",
+        "ProcessingJobArn",
+    ),
+    "transform-job": (
+        "list_transform_jobs",
+        "TransformJobSummaries",
+        "TransformJobName",
+        "TransformJobArn",
+    ),
+    "domain": ("list_domains", "Domains", "DomainId", "DomainArn"),
+    "app": ("list_apps", "Apps", "AppName", "AppArn"),
+    "feature-group": (
+        "list_feature_groups",
+        "FeatureGroupSummaries",
+        "FeatureGroupName",
+        "FeatureGroupArn",
+    ),
+    "workteam": ("list_workteams", "Workteams", "WorkteamName", "WorkteamArn"),
+}
 
 
 def _s3_findings(

@@ -96,6 +96,36 @@ class CoreContractTest(unittest.TestCase):
                     execute=False,
                 )
 
+    def test_cleanup_all_explains_old_orphaned_reports(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "report.json"
+            Report(
+                tool="orphaned",
+                findings=[
+                    Finding(
+                        id="old-log-group",
+                        tool="orphaned",
+                        account_id="123456789012",
+                        region="eu-west-1",
+                        service="logs",
+                        resource_type="log-group",
+                        resource_id="/aws/lambda/old",
+                        recommendation="Review ownership before cleanup",
+                    )
+                ],
+            ).write_json(path)
+
+            with self.assertRaisesRegex(
+                CleanupError,
+                "Regenerate the report",
+            ):
+                apply_findings(
+                    context=None,
+                    report_path=path,
+                    finding_ids=["ALL"],
+                    execute=False,
+                )
+
     def test_delete_log_group_cleanup_executes_delete(self):
         finding = _orphaned_log_group_finding()
         context = AwsContext(
@@ -342,6 +372,60 @@ class CoreContractTest(unittest.TestCase):
             ],
         )
 
+    def test_dynamodb_table_is_reported_when_unowned(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeDynamoDbClient(),
+        ):
+            resources = orphaned._dynamodb_resources(_context(), "eu-west-1")
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "dynamodb")
+        self.assertEqual(resources[0].resource_type, "table")
+        self.assertEqual(resources[0].resource_id, "table-one")
+
+    def test_opensearch_serverless_collection_is_reported(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeOpenSearchServerlessClient(),
+        ):
+            resources = orphaned._opensearch_serverless_resources(
+                _context(),
+                "eu-west-1",
+            )
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "opensearchserverless")
+        self.assertEqual(resources[0].resource_type, "collection")
+        self.assertEqual(resources[0].resource_id, "collection-id")
+
+    def test_bedrock_knowledge_base_is_reported(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeBedrockAgentClient(),
+        ):
+            resources = orphaned._bedrock_resources(_context(), "eu-west-1")
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "bedrock-agent")
+        self.assertEqual(resources[0].resource_type, "knowledge-base")
+        self.assertEqual(resources[0].resource_id, "KB123")
+
+    def test_sagemaker_endpoint_is_reported(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeSageMakerClient(),
+        ):
+            resources = orphaned._sagemaker_named_resources(
+                FakeSageMakerClient(),
+                "endpoint",
+            )
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "sagemaker")
+        self.assertEqual(resources[0].resource_type, "endpoint")
+        self.assertEqual(resources[0].resource_id, "endpoint-one")
+
     def test_orphaned_log_group_has_delete_action(self):
         finding = orphaned._finding(
             _context(),
@@ -585,6 +669,72 @@ class FakeCloudFrontPaginator:
                         }
                     ]
                 }
+            }
+        ]
+
+
+class FakeDynamoDbClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "list_tables":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeDynamoDbPaginator()
+
+    def describe_table(self, TableName):
+        return {
+            "Table": {
+                "TableName": TableName,
+                "TableArn": f"arn:aws:dynamodb:eu-west-1:123:table/{TableName}",
+            }
+        }
+
+
+class FakeDynamoDbPaginator:
+    def paginate(self):
+        return [{"TableNames": ["table-one"]}]
+
+
+class FakeOpenSearchServerlessClient:
+    def list_collections(self):
+        return {
+            "collectionSummaries": [
+                {
+                    "id": "collection-id",
+                    "arn": "arn:aws:aoss:eu-west-1:123:collection/collection-id",
+                    "name": "vectors",
+                }
+            ]
+        }
+
+
+class FakeBedrockAgentClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "list_knowledge_bases":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeBedrockKnowledgeBasePaginator()
+
+
+class FakeBedrockKnowledgeBasePaginator:
+    def paginate(self):
+        return [{"knowledgeBaseSummaries": [{"knowledgeBaseId": "KB123"}]}]
+
+
+class FakeSageMakerClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "list_endpoints":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeSageMakerEndpointPaginator()
+
+
+class FakeSageMakerEndpointPaginator:
+    def paginate(self):
+        return [
+            {
+                "Endpoints": [
+                    {
+                        "EndpointName": "endpoint-one",
+                        "EndpointArn": "arn:aws:sagemaker:eu-west-1:123:endpoint/one",
+                    }
+                ]
             }
         ]
 

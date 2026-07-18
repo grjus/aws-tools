@@ -74,6 +74,15 @@ or excluded, with evidence that suppressed them from the default report. For
 CloudFormation-managed resources, evidence includes the stack name, stack ID,
 logical resource ID, resource type, and stack region.
 
+## Orphaned resource coverage
+
+`orphaned scan` currently checks EC2, EBS, Elastic IPs, NAT gateways, load
+balancers, target groups, RDS instances and clusters, Lambda functions,
+CloudWatch log groups, S3 buckets, CloudFront distributions, DynamoDB tables,
+OpenSearch Serverless collections, Bedrock knowledge bases, and SageMaker
+notebook instances, endpoints, models, jobs, domains, apps, feature groups, and
+workteams.
+
 ## Roadmap
 
 - Orphaned resources scanner.

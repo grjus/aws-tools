@@ -40,7 +40,7 @@ def _select_findings(
             if finding.cleanup_eligible and finding.cleanup_action is not None
         ]
         if not selected:
-            raise CleanupError("Report has no cleanup-eligible findings")
+            raise CleanupError(_no_cleanup_findings_message(findings))
         return selected
 
     by_id = {finding.id: finding for finding in findings}
@@ -53,6 +53,26 @@ def _select_findings(
             raise CleanupError(f"Finding is not cleanup eligible: {finding_id}")
         selected.append(finding)
     return selected
+
+
+def _no_cleanup_findings_message(findings: list[Finding]) -> str:
+    candidates = [
+        finding
+        for finding in findings
+        if (
+            finding.service == "logs"
+            and finding.resource_type == "log-group"
+            or finding.service == "s3"
+            and finding.resource_type == "bucket"
+        )
+    ]
+    if candidates:
+        return (
+            "Report has no cleanup-eligible findings, but contains "
+            f"{len(candidates)} logs/S3 findings without cleanup actions. "
+            "Regenerate the report with the current orphaned scanner."
+        )
+    return "Report has no cleanup-eligible findings"
 
 
 def _apply_finding(
