@@ -54,10 +54,10 @@ the report. Findings without a supported cleanup action are never applied by
 
 The orphaned scanner currently emits destructive cleanup actions for orphaned
 CloudWatch log groups and S3 buckets. Log group cleanup calls
-`logs.delete_log_group`. S3 bucket cleanup calls `s3.delete_bucket` only after
-state checks confirm the bucket exists, is not versioned, has no object lock,
-has no replication configuration, and has no objects, versions, or delete
-markers. The tool does not empty buckets.
+`logs.delete_log_group`. S3 bucket cleanup deletes current objects, then calls
+`s3.delete_bucket` after state checks confirm the bucket exists, is not
+versioned, has no object lock, has no replication configuration, and has no
+object versions or delete markers.
 
 Use `--filter` on scan commands to keep only services you care about in the
 console output and saved JSON report. A filter can be a service such as `logs`,
@@ -73,6 +73,15 @@ the orphan report. It includes resources classified as CloudFormation-managed
 or excluded, with evidence that suppressed them from the default report. For
 CloudFormation-managed resources, evidence includes the stack name, stack ID,
 logical resource ID, resource type, and stack region.
+
+## Orphaned resource coverage
+
+`orphaned scan` currently checks EC2, EBS, Elastic IPs, NAT gateways, load
+balancers, target groups, RDS instances and clusters, Lambda functions,
+CloudWatch log groups, S3 buckets, CloudFront distributions, DynamoDB tables,
+OpenSearch Serverless collections, Bedrock knowledge bases, and SageMaker
+notebook instances, endpoints, models, jobs, domains, apps, feature groups, and
+workteams.
 
 ## Roadmap
 

@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from aws_tools.aws import AwsContext, create_context
@@ -96,6 +97,36 @@ class CoreContractTest(unittest.TestCase):
                     execute=False,
                 )
 
+    def test_cleanup_all_explains_old_orphaned_reports(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "report.json"
+            Report(
+                tool="orphaned",
+                findings=[
+                    Finding(
+                        id="old-log-group",
+                        tool="orphaned",
+                        account_id="123456789012",
+                        region="eu-west-1",
+                        service="logs",
+                        resource_type="log-group",
+                        resource_id="/aws/lambda/old",
+                        recommendation="Review ownership before cleanup",
+                    )
+                ],
+            ).write_json(path)
+
+            with self.assertRaisesRegex(
+                CleanupError,
+                "Regenerate the report",
+            ):
+                apply_findings(
+                    context=None,
+                    report_path=path,
+                    finding_ids=["ALL"],
+                    execute=False,
+                )
+
     def test_delete_log_group_cleanup_executes_delete(self):
         finding = _orphaned_log_group_finding()
         context = AwsContext(
@@ -117,7 +148,7 @@ class CoreContractTest(unittest.TestCase):
         self.assertEqual(message, "APPLIED orphaned-log-group: log group deleted")
         self.assertEqual(logs.deleted, ["/aws/lambda/orphaned"])
 
-    def test_delete_empty_bucket_cleanup_executes_delete(self):
+    def test_delete_bucket_cleanup_empties_bucket_and_deletes(self):
         finding = _orphaned_bucket_finding()
         context = AwsContext(
             session=None,
@@ -125,7 +156,7 @@ class CoreContractTest(unittest.TestCase):
             profile="dev",
             regions=["eu-west-1"],
         )
-        s3 = FakeDeleteBucketClient()
+        s3 = FakeDeleteBucketClient(objects=["first.txt", "second.txt"])
 
         with patch("aws_tools.cleanup.client", return_value=s3):
             message = apply_findings_from_report(
@@ -135,10 +166,14 @@ class CoreContractTest(unittest.TestCase):
                 True,
             )[0]
 
-        self.assertEqual(message, "APPLIED orphaned-bucket: bucket deleted")
+        self.assertEqual(
+            message,
+            "APPLIED orphaned-bucket: bucket deleted after removing 2 objects",
+        )
+        self.assertEqual(s3.deleted_objects, ["first.txt", "second.txt"])
         self.assertEqual(s3.deleted, ["orphaned-bucket"])
 
-    def test_delete_bucket_refuses_non_empty_bucket(self):
+    def test_delete_bucket_refuses_version_markers(self):
         finding = _orphaned_bucket_finding()
         context = AwsContext(
             session=None,
@@ -146,7 +181,7 @@ class CoreContractTest(unittest.TestCase):
             profile="dev",
             regions=["eu-west-1"],
         )
-        s3 = FakeDeleteBucketClient(key_count=1)
+        s3 = FakeDeleteBucketClient(versions=["first.txt"])
 
         with patch("aws_tools.cleanup.client", return_value=s3):
             with self.assertRaises(CleanupError):
@@ -342,6 +377,60 @@ class CoreContractTest(unittest.TestCase):
             ],
         )
 
+    def test_dynamodb_table_is_reported_when_unowned(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeDynamoDbClient(),
+        ):
+            resources = orphaned._dynamodb_resources(_context(), "eu-west-1")
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "dynamodb")
+        self.assertEqual(resources[0].resource_type, "table")
+        self.assertEqual(resources[0].resource_id, "table-one")
+
+    def test_opensearch_serverless_collection_is_reported(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeOpenSearchServerlessClient(),
+        ):
+            resources = orphaned._opensearch_serverless_resources(
+                _context(),
+                "eu-west-1",
+            )
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "opensearchserverless")
+        self.assertEqual(resources[0].resource_type, "collection")
+        self.assertEqual(resources[0].resource_id, "collection-id")
+
+    def test_bedrock_knowledge_base_is_reported(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeBedrockAgentClient(),
+        ):
+            resources = orphaned._bedrock_resources(_context(), "eu-west-1")
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "bedrock-agent")
+        self.assertEqual(resources[0].resource_type, "knowledge-base")
+        self.assertEqual(resources[0].resource_id, "KB123")
+
+    def test_sagemaker_endpoint_is_reported(self):
+        with patch(
+            "aws_tools.scanners.orphaned.client",
+            return_value=FakeSageMakerClient(),
+        ):
+            resources = orphaned._sagemaker_named_resources(
+                FakeSageMakerClient(),
+                "endpoint",
+            )
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].service, "sagemaker")
+        self.assertEqual(resources[0].resource_type, "endpoint")
+        self.assertEqual(resources[0].resource_id, "endpoint-one")
+
     def test_orphaned_log_group_has_delete_action(self):
         finding = orphaned._finding(
             _context(),
@@ -374,7 +463,7 @@ class CoreContractTest(unittest.TestCase):
         self.assertTrue(finding.cleanup_eligible)
         self.assertEqual(
             finding.cleanup_action.name,
-            "s3.delete_bucket_if_empty",
+            "s3.empty_and_delete_bucket",
         )
 
 
@@ -428,10 +517,10 @@ def _orphaned_bucket_finding() -> Finding:
         resource_id="orphaned-bucket",
         cleanup_eligible=True,
         cleanup_action=CleanupAction(
-            name="s3.delete_bucket_if_empty",
+            name="s3.empty_and_delete_bucket",
             parameters={"bucket_name": "orphaned-bucket"},
         ),
-        recommendation="Delete empty orphaned bucket",
+        recommendation="Empty and delete orphaned bucket",
     )
 
 
@@ -589,6 +678,72 @@ class FakeCloudFrontPaginator:
         ]
 
 
+class FakeDynamoDbClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "list_tables":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeDynamoDbPaginator()
+
+    def describe_table(self, TableName):
+        return {
+            "Table": {
+                "TableName": TableName,
+                "TableArn": f"arn:aws:dynamodb:eu-west-1:123:table/{TableName}",
+            }
+        }
+
+
+class FakeDynamoDbPaginator:
+    def paginate(self):
+        return [{"TableNames": ["table-one"]}]
+
+
+class FakeOpenSearchServerlessClient:
+    def list_collections(self):
+        return {
+            "collectionSummaries": [
+                {
+                    "id": "collection-id",
+                    "arn": "arn:aws:aoss:eu-west-1:123:collection/collection-id",
+                    "name": "vectors",
+                }
+            ]
+        }
+
+
+class FakeBedrockAgentClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "list_knowledge_bases":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeBedrockKnowledgeBasePaginator()
+
+
+class FakeBedrockKnowledgeBasePaginator:
+    def paginate(self):
+        return [{"knowledgeBaseSummaries": [{"knowledgeBaseId": "KB123"}]}]
+
+
+class FakeSageMakerClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "list_endpoints":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeSageMakerEndpointPaginator()
+
+
+class FakeSageMakerEndpointPaginator:
+    def paginate(self):
+        return [
+            {
+                "Endpoints": [
+                    {
+                        "EndpointName": "endpoint-one",
+                        "EndpointArn": "arn:aws:sagemaker:eu-west-1:123:endpoint/one",
+                    }
+                ]
+            }
+        ]
+
+
 class FakeLogsClient:
     def __init__(self):
         self.deleted = []
@@ -602,16 +757,15 @@ class FakeLogsClient:
 
 
 class FakeDeleteBucketClient:
-    class exceptions:
-        class ObjectLockConfigurationNotFoundError(Exception):
-            pass
-
-        class ReplicationConfigurationNotFoundError(Exception):
-            pass
-
-    def __init__(self, key_count: int = 0):
-        self.key_count = key_count
+    def __init__(
+        self,
+        objects: list[str] | None = None,
+        versions: list[str] | None = None,
+    ):
+        self.objects = objects or []
+        self.versions = versions or []
         self.deleted = []
+        self.deleted_objects = []
 
     def head_bucket(self, Bucket):
         del Bucket
@@ -622,22 +776,50 @@ class FakeDeleteBucketClient:
 
     def get_object_lock_configuration(self, Bucket):
         del Bucket
-        raise self.exceptions.ObjectLockConfigurationNotFoundError()
+        raise _client_error("ObjectLockConfigurationNotFoundError")
 
     def get_bucket_replication(self, Bucket):
         del Bucket
-        raise self.exceptions.ReplicationConfigurationNotFoundError()
-
-    def list_objects_v2(self, Bucket, MaxKeys):
-        del Bucket, MaxKeys
-        return {"KeyCount": self.key_count}
+        raise _client_error("ReplicationConfigurationNotFoundError")
 
     def list_object_versions(self, Bucket, MaxKeys):
         del Bucket, MaxKeys
-        return {}
+        return {
+            "Versions": [{"Key": key} for key in self.versions],
+        }
+
+    def get_paginator(self, operation_name):
+        if operation_name != "list_objects_v2":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeS3ObjectsPaginator(self.objects)
+
+    def delete_objects(self, Bucket, Delete):
+        del Bucket
+        self.deleted_objects.extend(item["Key"] for item in Delete["Objects"])
 
     def delete_bucket(self, Bucket):
         self.deleted.append(Bucket)
+
+
+class FakeS3ObjectsPaginator:
+    def __init__(self, objects: list[str]):
+        self.objects = objects
+
+    def paginate(self, Bucket):
+        del Bucket
+        return [{"Contents": [{"Key": key} for key in self.objects]}]
+
+
+def _client_error(code: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {
+                "Code": code,
+                "Message": code,
+            }
+        },
+        "TestOperation",
+    )
 
 
 if __name__ == "__main__":
