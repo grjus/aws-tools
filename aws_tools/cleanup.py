@@ -114,16 +114,19 @@ def _apply_finding(
         logs.delete_log_group(logGroupName=params["log_group_name"])
         return f"APPLIED {finding.id}: log group deleted"
 
-    if action.name == "s3.delete_bucket_if_empty":
+    if action.name in {"s3.delete_bucket_if_empty", "s3.empty_and_delete_bucket"}:
         params = action.parameters
         if not execute:
-            return f"DRY-RUN {finding.id}: delete empty bucket {params['bucket_name']}"
+            return (
+                f"DRY-RUN {finding.id}: empty and delete bucket {params['bucket_name']}"
+            )
         if context is None:
             raise CleanupError("AWS context is required when --execute is set")
         s3 = client(context, "s3")
         _require_bucket_safe_to_delete(s3, params["bucket_name"])
+        deleted_objects = _empty_bucket(s3, params["bucket_name"])
         s3.delete_bucket(Bucket=params["bucket_name"])
-        return f"APPLIED {finding.id}: bucket deleted"
+        return f"APPLIED {finding.id}: bucket deleted after removing {deleted_objects} objects"
 
     raise CleanupError(f"Unsupported cleanup action: {action.name}")
 
@@ -137,17 +140,17 @@ def _require_log_group(logs, name: str) -> None:
 
 
 def _require_bucket_safe_to_delete(s3, bucket_name: str) -> None:
-    from botocore.exceptions import ClientError
-
     try:
         _require_bucket_exists(s3, bucket_name)
         _require_bucket_not_versioned(s3, bucket_name)
         _require_bucket_without_object_lock(s3, bucket_name)
         _require_bucket_without_replication(s3, bucket_name)
-        _require_bucket_empty(s3, bucket_name)
+        _require_bucket_without_versions(s3, bucket_name)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code")
-        raise CleanupError(f"S3 bucket state check failed ({code}): {bucket_name}") from exc
+        raise CleanupError(
+            f"S3 bucket state check failed ({code}): {bucket_name}"
+        ) from exc
 
 
 def _require_bucket_exists(s3, bucket_name: str) -> None:
@@ -183,13 +186,28 @@ def _require_bucket_without_replication(s3, bucket_name: str) -> None:
     raise CleanupError(f"Bucket has replication configured: {bucket_name}")
 
 
-def _require_bucket_empty(s3, bucket_name: str) -> None:
-    response = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
-    if response.get("KeyCount", 0) > 0:
-        raise CleanupError(f"Bucket is not empty: {bucket_name}")
+def _require_bucket_without_versions(s3, bucket_name: str) -> None:
     versions = s3.list_object_versions(Bucket=bucket_name, MaxKeys=1)
     if versions.get("Versions") or versions.get("DeleteMarkers"):
         raise CleanupError(f"Bucket has object versions/delete markers: {bucket_name}")
+
+
+def _empty_bucket(s3, bucket_name: str) -> int:
+    deleted = 0
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket_name):
+        objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+        if not objects:
+            continue
+        s3.delete_objects(
+            Bucket=bucket_name,
+            Delete={
+                "Objects": objects,
+                "Quiet": True,
+            },
+        )
+        deleted += len(objects)
+    return deleted
 
 
 def _error_code(exc: ClientError) -> str | None:

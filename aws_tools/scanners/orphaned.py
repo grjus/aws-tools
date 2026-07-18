@@ -195,7 +195,7 @@ def _cleanup_action(
         )
     if resource.service == "s3" and resource.resource_type == "bucket":
         return CleanupAction(
-            name="s3.delete_bucket_if_empty",
+            name="s3.empty_and_delete_bucket",
             parameters={"bucket_name": resource.resource_id},
         )
     return None
@@ -213,7 +213,7 @@ def _orphan_recommendation(resource: ResourceIdentity) -> str:
     if resource.service == "logs":
         return "Delete orphaned log group if logs are no longer needed"
     if resource.service == "s3":
-        return "Delete only after bucket state checks confirm it is empty"
+        return "Empty and delete after bucket state checks pass"
     return "Review ownership before cleanup"
 
 

@@ -148,7 +148,7 @@ class CoreContractTest(unittest.TestCase):
         self.assertEqual(message, "APPLIED orphaned-log-group: log group deleted")
         self.assertEqual(logs.deleted, ["/aws/lambda/orphaned"])
 
-    def test_delete_empty_bucket_cleanup_executes_delete(self):
+    def test_delete_bucket_cleanup_empties_bucket_and_deletes(self):
         finding = _orphaned_bucket_finding()
         context = AwsContext(
             session=None,
@@ -156,7 +156,7 @@ class CoreContractTest(unittest.TestCase):
             profile="dev",
             regions=["eu-west-1"],
         )
-        s3 = FakeDeleteBucketClient()
+        s3 = FakeDeleteBucketClient(objects=["first.txt", "second.txt"])
 
         with patch("aws_tools.cleanup.client", return_value=s3):
             message = apply_findings_from_report(
@@ -166,10 +166,14 @@ class CoreContractTest(unittest.TestCase):
                 True,
             )[0]
 
-        self.assertEqual(message, "APPLIED orphaned-bucket: bucket deleted")
+        self.assertEqual(
+            message,
+            "APPLIED orphaned-bucket: bucket deleted after removing 2 objects",
+        )
+        self.assertEqual(s3.deleted_objects, ["first.txt", "second.txt"])
         self.assertEqual(s3.deleted, ["orphaned-bucket"])
 
-    def test_delete_bucket_refuses_non_empty_bucket(self):
+    def test_delete_bucket_refuses_version_markers(self):
         finding = _orphaned_bucket_finding()
         context = AwsContext(
             session=None,
@@ -177,7 +181,7 @@ class CoreContractTest(unittest.TestCase):
             profile="dev",
             regions=["eu-west-1"],
         )
-        s3 = FakeDeleteBucketClient(key_count=1)
+        s3 = FakeDeleteBucketClient(versions=["first.txt"])
 
         with patch("aws_tools.cleanup.client", return_value=s3):
             with self.assertRaises(CleanupError):
@@ -459,7 +463,7 @@ class CoreContractTest(unittest.TestCase):
         self.assertTrue(finding.cleanup_eligible)
         self.assertEqual(
             finding.cleanup_action.name,
-            "s3.delete_bucket_if_empty",
+            "s3.empty_and_delete_bucket",
         )
 
 
@@ -513,10 +517,10 @@ def _orphaned_bucket_finding() -> Finding:
         resource_id="orphaned-bucket",
         cleanup_eligible=True,
         cleanup_action=CleanupAction(
-            name="s3.delete_bucket_if_empty",
+            name="s3.empty_and_delete_bucket",
             parameters={"bucket_name": "orphaned-bucket"},
         ),
-        recommendation="Delete empty orphaned bucket",
+        recommendation="Empty and delete orphaned bucket",
     )
 
 
@@ -753,9 +757,15 @@ class FakeLogsClient:
 
 
 class FakeDeleteBucketClient:
-    def __init__(self, key_count: int = 0):
-        self.key_count = key_count
+    def __init__(
+        self,
+        objects: list[str] | None = None,
+        versions: list[str] | None = None,
+    ):
+        self.objects = objects or []
+        self.versions = versions or []
         self.deleted = []
+        self.deleted_objects = []
 
     def head_bucket(self, Bucket):
         del Bucket
@@ -772,16 +782,32 @@ class FakeDeleteBucketClient:
         del Bucket
         raise _client_error("ReplicationConfigurationNotFoundError")
 
-    def list_objects_v2(self, Bucket, MaxKeys):
-        del Bucket, MaxKeys
-        return {"KeyCount": self.key_count}
-
     def list_object_versions(self, Bucket, MaxKeys):
         del Bucket, MaxKeys
-        return {}
+        return {
+            "Versions": [{"Key": key} for key in self.versions],
+        }
+
+    def get_paginator(self, operation_name):
+        if operation_name != "list_objects_v2":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeS3ObjectsPaginator(self.objects)
+
+    def delete_objects(self, Bucket, Delete):
+        del Bucket
+        self.deleted_objects.extend(item["Key"] for item in Delete["Objects"])
 
     def delete_bucket(self, Bucket):
         self.deleted.append(Bucket)
+
+
+class FakeS3ObjectsPaginator:
+    def __init__(self, objects: list[str]):
+        self.objects = objects
+
+    def paginate(self, Bucket):
+        del Bucket
+        return [{"Contents": [{"Key": key} for key in self.objects]}]
 
 
 def _client_error(code: str) -> ClientError:
