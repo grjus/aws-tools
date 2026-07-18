@@ -8,7 +8,11 @@ from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from aws_tools.aws import AwsContext, create_context
-from aws_tools.cloudformation import StackOwnership, deployed_stack_inventory, stack_details
+from aws_tools.cloudformation import (
+    StackOwnership,
+    deployed_stack_inventory,
+    stack_details,
+)
 from aws_tools.cleanup import CleanupError, apply_findings
 from aws_tools.config import AppConfig, ExclusionRule, load_config
 from aws_tools.filtering import apply_report_filters, parse_filters
