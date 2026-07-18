@@ -115,11 +115,17 @@ def _require_log_group(logs, name: str) -> None:
 
 
 def _require_bucket_safe_to_delete(s3, bucket_name: str) -> None:
-    _require_bucket_exists(s3, bucket_name)
-    _require_bucket_not_versioned(s3, bucket_name)
-    _require_bucket_without_object_lock(s3, bucket_name)
-    _require_bucket_without_replication(s3, bucket_name)
-    _require_bucket_empty(s3, bucket_name)
+    from botocore.exceptions import ClientError
+
+    try:
+        _require_bucket_exists(s3, bucket_name)
+        _require_bucket_not_versioned(s3, bucket_name)
+        _require_bucket_without_object_lock(s3, bucket_name)
+        _require_bucket_without_replication(s3, bucket_name)
+        _require_bucket_empty(s3, bucket_name)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        raise CleanupError(f"S3 bucket state check failed ({code}): {bucket_name}") from exc
 
 
 def _require_bucket_exists(s3, bucket_name: str) -> None:
