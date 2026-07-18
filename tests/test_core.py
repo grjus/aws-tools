@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from aws_tools.aws import AwsContext, create_context
@@ -752,13 +753,6 @@ class FakeLogsClient:
 
 
 class FakeDeleteBucketClient:
-    class exceptions:
-        class ObjectLockConfigurationNotFoundError(Exception):
-            pass
-
-        class ReplicationConfigurationNotFoundError(Exception):
-            pass
-
     def __init__(self, key_count: int = 0):
         self.key_count = key_count
         self.deleted = []
@@ -772,11 +766,11 @@ class FakeDeleteBucketClient:
 
     def get_object_lock_configuration(self, Bucket):
         del Bucket
-        raise self.exceptions.ObjectLockConfigurationNotFoundError()
+        raise _client_error("ObjectLockConfigurationNotFoundError")
 
     def get_bucket_replication(self, Bucket):
         del Bucket
-        raise self.exceptions.ReplicationConfigurationNotFoundError()
+        raise _client_error("ReplicationConfigurationNotFoundError")
 
     def list_objects_v2(self, Bucket, MaxKeys):
         del Bucket, MaxKeys
@@ -788,6 +782,18 @@ class FakeDeleteBucketClient:
 
     def delete_bucket(self, Bucket):
         self.deleted.append(Bucket)
+
+
+def _client_error(code: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {
+                "Code": code,
+                "Message": code,
+            }
+        },
+        "TestOperation",
+    )
 
 
 if __name__ == "__main__":

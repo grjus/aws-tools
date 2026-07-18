@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from botocore.exceptions import ClientError
+
 from aws_tools.aws import AwsContext, client
 from aws_tools.models import Finding
 from aws_tools.reports import load_report
@@ -164,16 +166,20 @@ def _require_bucket_not_versioned(s3, bucket_name: str) -> None:
 def _require_bucket_without_object_lock(s3, bucket_name: str) -> None:
     try:
         s3.get_object_lock_configuration(Bucket=bucket_name)
-    except s3.exceptions.ObjectLockConfigurationNotFoundError:
-        return
+    except ClientError as exc:
+        if _error_code(exc) == "ObjectLockConfigurationNotFoundError":
+            return
+        raise
     raise CleanupError(f"Bucket has object lock configured: {bucket_name}")
 
 
 def _require_bucket_without_replication(s3, bucket_name: str) -> None:
     try:
         s3.get_bucket_replication(Bucket=bucket_name)
-    except s3.exceptions.ReplicationConfigurationNotFoundError:
-        return
+    except ClientError as exc:
+        if _error_code(exc) == "ReplicationConfigurationNotFoundError":
+            return
+        raise
     raise CleanupError(f"Bucket has replication configured: {bucket_name}")
 
 
@@ -184,3 +190,7 @@ def _require_bucket_empty(s3, bucket_name: str) -> None:
     versions = s3.list_object_versions(Bucket=bucket_name, MaxKeys=1)
     if versions.get("Versions") or versions.get("DeleteMarkers"):
         raise CleanupError(f"Bucket has object versions/delete markers: {bucket_name}")
+
+
+def _error_code(exc: ClientError) -> str | None:
+    return exc.response.get("Error", {}).get("Code")
