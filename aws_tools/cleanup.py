@@ -131,7 +131,7 @@ def _require_bucket_not_versioned(s3, bucket_name: str) -> None:
     status = versioning.get("Status")
     if status in {"Enabled", "Suspended"}:
         raise CleanupError(f"Bucket has versioning {status}: {bucket_name}")
-    if versioning.get("MFADelete"):
+    if versioning.get("MFADelete") == "Enabled":
         raise CleanupError(f"Bucket has MFA delete configured: {bucket_name}")
 
 
