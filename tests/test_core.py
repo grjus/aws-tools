@@ -18,7 +18,7 @@ from aws_tools.config import AppConfig, ExclusionRule, load_config
 from aws_tools.filtering import apply_report_filters, parse_filters
 from aws_tools.models import CleanupAction, Finding, Report, stable_finding_id
 from aws_tools.reports import load_report
-from aws_tools.scanners import cost_risk, orphaned
+from aws_tools.scanners import cost_risk, logs_retention, orphaned, tag_compliance
 
 
 class CoreContractTest(unittest.TestCase):
@@ -270,10 +270,66 @@ class CoreContractTest(unittest.TestCase):
         ec2 = FakeEc2Client()
 
         with patch("aws_tools.scanners.cost_risk.client", return_value=ec2):
-            findings = cost_risk._ec2_cost_findings(context, "eu-west-1")
+            findings = cost_risk._ec2_cost_findings(
+                context,
+                "eu-west-1",
+                {
+                    "eipalloc-123": _stack_owner(
+                        "eipalloc-123",
+                        resource_type="AWS::EC2::EIP",
+                    )
+                },
+            )
 
         self.assertIn("describe_addresses", ec2.calls)
         self.assertEqual(findings[0].resource_id, "eipalloc-123")
+        self.assertEqual(findings[0].stack_name, "test-stack")
+        self.assertEqual(findings[0].stack_resource_type, "AWS::EC2::EIP")
+
+    def test_logs_retention_finding_includes_stack_owner(self):
+        finding = logs_retention._finding(
+            _context(),
+            AppConfig(),
+            "eu-west-1",
+            {
+                "logGroupName": "/aws/lambda/app-function",
+                "arn": (
+                    "arn:aws:logs:eu-west-1:123456789012:"
+                    "log-group:/aws/lambda/app-function:*"
+                ),
+            },
+            None,
+            {
+                "/aws/lambda/app-function": _stack_owner(
+                    "/aws/lambda/app-function",
+                    resource_type="AWS::Logs::LogGroup",
+                )
+            },
+        )
+
+        self.assertEqual(finding.stack_name, "test-stack")
+        self.assertEqual(finding.stack_logical_resource_id, "Resource")
+        self.assertEqual(finding.stack_resource_type, "AWS::Logs::LogGroup")
+
+    def test_tag_compliance_resolves_stack_owner_from_arn_resource_name(self):
+        ownership = {
+            "app-function": _stack_owner(
+                "app-function",
+                resource_type="AWS::Lambda::Function",
+            )
+        }
+
+        findings = tag_compliance._region_findings(
+            _context(),
+            AppConfig(),
+            "eu-west-1",
+            FakeTaggingClient(),
+            ownership,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].stack_name, "test-stack")
+        self.assertEqual(findings[0].stack_resource_type, "AWS::Lambda::Function")
 
     def test_read_only_role_loaded_from_env(self):
         with patch.dict(
@@ -605,13 +661,16 @@ def _cloudfront_finding() -> Finding:
     )
 
 
-def _stack_owner(resource_id: str) -> StackOwnership:
+def _stack_owner(
+    resource_id: str,
+    resource_type: str = "AWS::CloudFront::Distribution",
+) -> StackOwnership:
     del resource_id
     return StackOwnership(
         stack_id="arn:aws:cloudformation:stack/test-stack",
         stack_name="test-stack",
         logical_resource_id="Resource",
-        resource_type="AWS::CloudFront::Distribution",
+        resource_type=resource_type,
         region="eu-west-1",
     )
 
@@ -660,6 +719,30 @@ class FakePaginator:
         if self.operation_name == "describe_instances":
             return [{"Reservations": []}]
         raise AssertionError(f"Unexpected paginator: {self.operation_name}")
+
+
+class FakeTaggingClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "get_resources":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeTaggingPaginator()
+
+
+class FakeTaggingPaginator:
+    def paginate(self):
+        return [
+            {
+                "ResourceTagMappingList": [
+                    {
+                        "ResourceARN": (
+                            "arn:aws:lambda:eu-west-1:123456789012:"
+                            "function:app-function"
+                        ),
+                        "Tags": [{"Key": "Owner", "Value": "platform"}],
+                    }
+                ]
+            }
+        ]
 
 
 class FakeBoto3Session:

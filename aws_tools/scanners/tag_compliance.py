@@ -3,8 +3,10 @@ from __future__ import annotations
 from botocore.exceptions import ClientError
 
 from aws_tools.aws import AwsContext, client
+from aws_tools.cloudformation import StackOwnership, stack_resource_ownership
 from aws_tools.config import AppConfig
 from aws_tools.models import Confidence, Finding, Report, Risk, stable_finding_id
+from aws_tools.scanners.common import stack_fields, stack_owner_for
 
 
 TOOL = "tag-compliance"
@@ -14,7 +16,8 @@ def scan(context: AwsContext, config: AppConfig) -> Report:
     findings: list[Finding] = []
     for region in context.regions:
         tagging = client(context, "resourcegroupstaggingapi", region)
-        findings.extend(_region_findings(context, config, region, tagging))
+        ownership = stack_resource_ownership(context, region)
+        findings.extend(_region_findings(context, config, region, tagging, ownership))
     return Report(
         tool=TOOL,
         profile=context.profile,
@@ -29,6 +32,7 @@ def _region_findings(
     config: AppConfig,
     region: str,
     tagging,
+    ownership: dict[str, StackOwnership],
 ) -> list[Finding]:
     findings: list[Finding] = []
     try:
@@ -39,6 +43,7 @@ def _region_findings(
                 if not missing:
                     continue
                 arn = resource["ResourceARN"]
+                owner = stack_owner_for(ownership, arn)
                 findings.append(
                     Finding(
                         id=stable_finding_id(
@@ -56,6 +61,7 @@ def _region_findings(
                         resource_type="resource",
                         resource_id=arn,
                         arn=arn,
+                        **stack_fields(owner),
                         tags=tags,
                         evidence=[f"Missing required tags: {', '.join(missing)}"],
                         risk=Risk.LOW,
