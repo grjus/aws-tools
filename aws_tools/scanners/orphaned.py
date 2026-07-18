@@ -112,7 +112,9 @@ def _finding(
         config,
     )
     cleanup_action = _cleanup_action(resource, ownership, config)
-    owner = stack_owner_for(ownership, resource.resource_id, resource.arn, resource.name)
+    owner = stack_owner_for(
+        ownership, resource.resource_id, resource.arn, resource.name
+    )
     return Finding(
         id=stable_finding_id(
             TOOL,
