@@ -8,9 +8,10 @@ from rich.console import Console
 
 from aws_tools.aws import create_context
 from aws_tools.cleanup import CleanupError, apply_findings
+from aws_tools.cloudformation import deployed_stack_inventory, stack_details
 from aws_tools.config import load_config
 from aws_tools.filtering import apply_report_filters
-from aws_tools.render import render_report
+from aws_tools.render import render_report, render_stack_details, render_stack_inventory
 from aws_tools.reports import default_report_path
 from aws_tools.scanners import cost_risk, logs_retention, orphaned, tag_compliance
 
@@ -51,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scan_command(subparsers, "logs-retention", _handle_logs_scan)
     _add_scan_command(subparsers, "cost-risk", _handle_cost_scan)
     _add_scan_command(subparsers, "tag-compliance", _handle_tag_scan)
+    _add_stacks_command(subparsers)
     _add_cleanup_command(subparsers)
     _add_roadmap_command(subparsers)
     return parser
@@ -99,6 +101,26 @@ def _add_cleanup_command(subparsers) -> None:
         help="Apply actions. Omit for dry-run.",
     )
     apply_parser.set_defaults(handler=_handle_cleanup_apply)
+
+
+def _add_stacks_command(subparsers) -> None:
+    parser = subparsers.add_parser("stacks")
+    nested = parser.add_subparsers(dest="action")
+    list_parser = nested.add_parser("list")
+    list_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Write detailed stack inventory JSON to this path.",
+    )
+    list_parser.set_defaults(handler=_handle_stacks_list)
+    details_parser = nested.add_parser("details")
+    details_parser.add_argument("stack_name", help="CloudFormation stack name or ID.")
+    details_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Write detailed stack resources JSON to this path.",
+    )
+    details_parser.set_defaults(handler=_handle_stacks_details)
 
 
 def _add_roadmap_command(subparsers) -> None:
@@ -152,6 +174,31 @@ def _handle_cleanup_apply(args) -> int:
     for message in messages:
         console.print(message)
     return 0
+
+
+def _handle_stacks_list(args) -> int:
+    _, context = _context(args)
+    inventory = deployed_stack_inventory(context)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(inventory.model_dump_json(indent=2), encoding="utf-8")
+    render_stack_inventory(inventory, args.output)
+    return 1 if inventory.scan_errors else 0
+
+
+def _handle_stacks_details(args) -> int:
+    _, context = _context(args)
+    details = stack_details(context, args.stack_name)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(details.model_dump_json(indent=2), encoding="utf-8")
+    if not details.stacks:
+        console.print(f"[red]Stack not found:[/red] {args.stack_name}")
+        if details.scan_errors:
+            render_stack_details(details, args.output)
+        return 1
+    render_stack_details(details, args.output)
+    return 1 if details.scan_errors else 0
 
 
 def _handle_roadmap(args) -> int:
