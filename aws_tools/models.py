@@ -36,6 +36,11 @@ class Finding(BaseModel):
     resource_id: str
     arn: str | None = None
     name: str | None = None
+    stack_id: str | None = None
+    stack_name: str | None = None
+    stack_logical_resource_id: str | None = None
+    stack_resource_type: str | None = None
+    stack_region: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
     evidence: list[str] = Field(default_factory=list)
     risk: Risk = Risk.MEDIUM

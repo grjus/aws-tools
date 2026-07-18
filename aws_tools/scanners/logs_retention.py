@@ -3,6 +3,7 @@ from __future__ import annotations
 from botocore.exceptions import ClientError
 
 from aws_tools.aws import AwsContext, client
+from aws_tools.cloudformation import StackOwnership, stack_resource_ownership
 from aws_tools.config import AppConfig
 from aws_tools.models import (
     CleanupAction,
@@ -12,6 +13,7 @@ from aws_tools.models import (
     Risk,
     stable_finding_id,
 )
+from aws_tools.scanners.common import stack_fields, stack_owner_for
 
 
 TOOL = "logs-retention"
@@ -36,6 +38,7 @@ def _region_findings(
     region: str,
 ) -> list[Finding]:
     logs = client(context, "logs", region)
+    ownership = stack_resource_ownership(context, region)
     findings: list[Finding] = []
     try:
         for page in logs.get_paginator("describe_log_groups").paginate():
@@ -43,7 +46,9 @@ def _region_findings(
                 retention = group.get("retentionInDays")
                 if retention is not None and retention <= config.log_retention_days:
                     continue
-                findings.append(_finding(context, config, region, group, retention))
+                findings.append(
+                    _finding(context, config, region, group, retention, ownership)
+                )
     except ClientError:
         return findings
     return findings
@@ -55,8 +60,10 @@ def _finding(
     region: str,
     group: dict,
     retention: int | None,
+    ownership: dict[str, StackOwnership],
 ) -> Finding:
     name = group["logGroupName"]
+    owner = stack_owner_for(ownership, name, group.get("arn"))
     evidence = (
         ["No retention policy set"]
         if retention is None
@@ -73,6 +80,7 @@ def _finding(
         resource_type="log-group",
         resource_id=name,
         arn=group.get("arn"),
+        **stack_fields(owner),
         evidence=evidence,
         risk=Risk.LOW,
         confidence=Confidence.HIGH,

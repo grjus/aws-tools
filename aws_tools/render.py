@@ -39,6 +39,7 @@ def render_report(report: Report, path: Path | None = None) -> None:
     table.add_column("Service")
     table.add_column("Region")
     table.add_column("Resource")
+    table.add_column("Stack")
     table.add_column("Recommendation")
 
     for finding in report.findings:
@@ -48,6 +49,7 @@ def render_report(report: Report, path: Path | None = None) -> None:
             finding.service,
             finding.region,
             finding.resource_id,
+            finding.stack_name or "-",
             finding.recommendation,
         )
 

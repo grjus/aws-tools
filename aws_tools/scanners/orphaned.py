@@ -18,7 +18,7 @@ from aws_tools.models import (
     ScanError,
     stable_finding_id,
 )
-from aws_tools.scanners.common import tag_dict
+from aws_tools.scanners.common import stack_fields, stack_owner_for, tag_dict
 
 
 TOOL = "orphaned"
@@ -112,6 +112,7 @@ def _finding(
         config,
     )
     cleanup_action = _cleanup_action(resource, ownership, config)
+    owner = stack_owner_for(ownership, resource.resource_id, resource.arn, resource.name)
     return Finding(
         id=stable_finding_id(
             TOOL,
@@ -129,6 +130,7 @@ def _finding(
         resource_id=resource.resource_id,
         arn=resource.arn,
         name=resource.name,
+        **stack_fields(owner),
         tags=resource.tags,
         evidence=evidence,
         risk=risk,
