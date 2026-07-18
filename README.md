@@ -39,6 +39,10 @@ aws-tools orphaned scan --include-managed
 aws-tools logs-retention scan
 aws-tools cost-risk scan
 aws-tools tag-compliance scan
+aws-tools stacks list
+aws-tools stacks list --output .aws-tools/reports/stacks.json
+aws-tools stacks details <stack-name>
+aws-tools stacks details <stack-name> --regions eu-west-1 --output .aws-tools/reports/stack-details.json
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id>
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids ALL
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id> --execute
@@ -73,6 +77,20 @@ the orphan report. It includes resources classified as CloudFormation-managed
 or excluded, with evidence that suppressed them from the default report. For
 CloudFormation-managed resources, evidence includes the stack name, stack ID,
 logical resource ID, resource type, and stack region.
+
+Use `aws-tools stacks list` to list active CloudFormation stacks across the
+configured regions. The console table shows status, creation time, last
+modified time, resource count, drift status, and termination protection. Use
+`--output` for detailed JSON including resource type counts, nested stack IDs,
+capabilities, notification ARNs, and parameter/output/tag keys. Parameter values
+are intentionally omitted from the inventory.
+
+Use `aws-tools stacks details <stack-name>` to show detailed information for a
+specific stack name or stack ID, including every CloudFormation resource, its
+logical ID, physical ID, type, status, last update time, and drift status. The
+command searches the configured regions; pass `--regions <region>` to narrow
+the lookup. Use `--output` to save the detailed JSON. Parameter values are
+intentionally omitted from the details output.
 
 ## Orphaned resource coverage
 

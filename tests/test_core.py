@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -7,7 +8,7 @@ from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from aws_tools.aws import AwsContext, create_context
-from aws_tools.cloudformation import StackOwnership
+from aws_tools.cloudformation import StackOwnership, deployed_stack_inventory, stack_details
 from aws_tools.cleanup import CleanupError, apply_findings
 from aws_tools.config import AppConfig, ExclusionRule, load_config
 from aws_tools.filtering import apply_report_filters, parse_filters
@@ -466,6 +467,56 @@ class CoreContractTest(unittest.TestCase):
             "s3.empty_and_delete_bucket",
         )
 
+    def test_deployed_stack_inventory_includes_stack_metadata(self):
+        with patch(
+            "aws_tools.cloudformation.client",
+            return_value=FakeCloudFormationClient(),
+        ):
+            inventory = deployed_stack_inventory(_context())
+
+        self.assertEqual(len(inventory.stacks), 1)
+        stack = inventory.stacks[0]
+        self.assertEqual(stack.stack_name, "app-stack")
+        self.assertEqual(stack.stack_status, "UPDATE_COMPLETE")
+        self.assertEqual(
+            stack.creation_time,
+            datetime(2024, 1, 2, 3, 4, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            stack.last_updated_time,
+            datetime(2024, 2, 3, 4, 5, tzinfo=timezone.utc),
+        )
+        self.assertEqual(stack.resource_count, 3)
+        self.assertEqual(
+            stack.resource_types,
+            {
+                "AWS::Lambda::Function": 1,
+                "AWS::S3::Bucket": 2,
+            },
+        )
+        self.assertEqual(stack.parameter_keys, ["DbPassword"])
+        self.assertEqual(stack.output_keys, ["ApiUrl"])
+        self.assertEqual(stack.tag_keys, ["Environment"])
+        self.assertNotIn("super-secret", inventory.model_dump_json())
+
+    def test_stack_details_includes_stack_resources(self):
+        with patch(
+            "aws_tools.cloudformation.client",
+            return_value=FakeCloudFormationClient(),
+        ):
+            details = stack_details(_context(), "app-stack")
+
+        self.assertEqual(len(details.stacks), 1)
+        stack = details.stacks[0]
+        resources = details.resources[stack.stack_id]
+        self.assertEqual(len(resources), 3)
+        self.assertEqual(resources[0].logical_resource_id, "Function")
+        self.assertEqual(resources[0].resource_type, "AWS::Lambda::Function")
+        self.assertEqual(resources[0].physical_resource_id, "app-function")
+        self.assertEqual(resources[0].resource_status, "CREATE_COMPLETE")
+        self.assertEqual(resources[0].drift_status, "IN_SYNC")
+        self.assertNotIn("super-secret", details.model_dump_json())
+
 
 def _logs_finding() -> Finding:
     return Finding(
@@ -808,6 +859,138 @@ class FakeS3ObjectsPaginator:
     def paginate(self, Bucket):
         del Bucket
         return [{"Contents": [{"Key": key} for key in self.objects]}]
+
+
+class FakeCloudFormationClient:
+    def get_paginator(self, operation_name):
+        if operation_name == "list_stacks":
+            return FakeCloudFormationListStacksPaginator()
+        if operation_name == "list_stack_resources":
+            return FakeCloudFormationResourcesPaginator()
+        raise AssertionError(f"Unexpected paginator: {operation_name}")
+
+    def describe_stacks(self, StackName):
+        del StackName
+        return {
+            "Stacks": [
+                {
+                    "StackId": "arn:aws:cloudformation:stack/app-stack/abc",
+                    "StackName": "app-stack",
+                    "StackStatus": "UPDATE_COMPLETE",
+                    "CreationTime": datetime(
+                        2024,
+                        1,
+                        2,
+                        3,
+                        4,
+                        tzinfo=timezone.utc,
+                    ),
+                    "LastUpdatedTime": datetime(
+                        2024,
+                        2,
+                        3,
+                        4,
+                        5,
+                        tzinfo=timezone.utc,
+                    ),
+                    "Description": "Application stack",
+                    "DriftInformation": {
+                        "StackDriftStatus": "IN_SYNC",
+                        "LastCheckTimestamp": datetime(
+                            2024,
+                            2,
+                            4,
+                            5,
+                            6,
+                            tzinfo=timezone.utc,
+                        ),
+                    },
+                    "EnableTerminationProtection": True,
+                    "Parameters": [
+                        {
+                            "ParameterKey": "DbPassword",
+                            "ParameterValue": "super-secret",
+                        }
+                    ],
+                    "Outputs": [{"OutputKey": "ApiUrl", "OutputValue": "https://x"}],
+                    "Tags": [{"Key": "Environment", "Value": "prod"}],
+                }
+            ]
+        }
+
+
+class FakeCloudFormationListStacksPaginator:
+    def paginate(self, **kwargs):
+        self.kwargs = kwargs
+        return [
+            {
+                "StackSummaries": [
+                    {
+                        "StackId": "arn:aws:cloudformation:stack/app-stack/abc",
+                        "StackName": "app-stack",
+                    }
+                ]
+            }
+        ]
+
+
+class FakeCloudFormationResourcesPaginator:
+    def paginate(self, StackName):
+        del StackName
+        return [
+            {
+                "StackResourceSummaries": [
+                    {
+                        "LogicalResourceId": "Bucket",
+                        "PhysicalResourceId": "app-bucket",
+                        "ResourceType": "AWS::S3::Bucket",
+                        "ResourceStatus": "CREATE_COMPLETE",
+                        "LastUpdatedTimestamp": datetime(
+                            2024,
+                            1,
+                            2,
+                            3,
+                            5,
+                            tzinfo=timezone.utc,
+                        ),
+                        "DriftInformation": {
+                            "StackResourceDriftStatus": "IN_SYNC",
+                        },
+                    },
+                    {
+                        "LogicalResourceId": "BucketPolicy",
+                        "PhysicalResourceId": "app-bucket-policy",
+                        "ResourceType": "AWS::S3::Bucket",
+                        "ResourceStatus": "CREATE_COMPLETE",
+                        "LastUpdatedTimestamp": datetime(
+                            2024,
+                            1,
+                            2,
+                            3,
+                            6,
+                            tzinfo=timezone.utc,
+                        ),
+                    },
+                    {
+                        "LogicalResourceId": "Function",
+                        "PhysicalResourceId": "app-function",
+                        "ResourceType": "AWS::Lambda::Function",
+                        "ResourceStatus": "CREATE_COMPLETE",
+                        "LastUpdatedTimestamp": datetime(
+                            2024,
+                            1,
+                            2,
+                            3,
+                            7,
+                            tzinfo=timezone.utc,
+                        ),
+                        "DriftInformation": {
+                            "StackResourceDriftStatus": "IN_SYNC",
+                        },
+                    },
+                ]
+            }
+        ]
 
 
 def _client_error(code: str) -> ClientError:
