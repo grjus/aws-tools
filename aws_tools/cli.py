@@ -10,8 +10,14 @@ from aws_tools.aws import create_context
 from aws_tools.cleanup import CleanupError, apply_findings
 from aws_tools.cloudformation import deployed_stack_inventory, stack_details
 from aws_tools.config import load_config
+from aws_tools.costs import get_cost_details
 from aws_tools.filtering import apply_report_filters
-from aws_tools.render import render_report, render_stack_details, render_stack_inventory
+from aws_tools.render import (
+    render_cost_details,
+    render_report,
+    render_stack_details,
+    render_stack_inventory,
+)
 from aws_tools.reports import default_report_path
 from aws_tools.scanners import cost_risk, logs_retention, orphaned, tag_compliance
 
@@ -52,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scan_command(subparsers, "logs-retention", _handle_logs_scan)
     _add_scan_command(subparsers, "cost-risk", _handle_cost_scan)
     _add_scan_command(subparsers, "tag-compliance", _handle_tag_scan)
+    _add_cost_command(subparsers)
     _add_stacks_command(subparsers)
     _add_cleanup_command(subparsers)
     _add_roadmap_command(subparsers)
@@ -101,6 +108,24 @@ def _add_cleanup_command(subparsers) -> None:
         help="Apply actions. Omit for dry-run.",
     )
     apply_parser.set_defaults(handler=_handle_cleanup_apply)
+
+
+def _add_cost_command(subparsers) -> None:
+    parser = subparsers.add_parser("cost")
+    nested = parser.add_subparsers(dest="action")
+    details = nested.add_parser("details")
+    details.add_argument(
+        "--past-months",
+        type=_non_negative_int,
+        default=3,
+        help="Number of completed months to include before the current month.",
+    )
+    details.add_argument(
+        "--output",
+        type=Path,
+        help="Write cost details JSON to this path.",
+    )
+    details.set_defaults(handler=_handle_cost_details)
 
 
 def _add_stacks_command(subparsers) -> None:
@@ -156,6 +181,16 @@ def _handle_tag_scan(args) -> int:
     return _finish_scan(config, report, args)
 
 
+def _handle_cost_details(args) -> int:
+    _, context = _context(args)
+    details = get_cost_details(context, past_months=args.past_months)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(details.model_dump_json(indent=2), encoding="utf-8")
+    render_cost_details(details, args.output)
+    return 0
+
+
 def _handle_cleanup_apply(args) -> int:
     finding_ids = [item.strip() for item in args.ids.split(",") if item.strip()]
     context = None
@@ -209,6 +244,7 @@ def _handle_roadmap(args) -> int:
         "logs-retention scan/apply",
         "cost-risk scan",
         "tag-compliance scan",
+        "cost details",
         "security group cleanup",
         "s3 hygiene",
         "iam access key audit",
@@ -245,6 +281,13 @@ def _context(args, assume_read_only_role: bool = True):
         config,
         assume_read_only_role=assume_read_only_role,
     )
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be 0 or greater")
+    return parsed
 
 
 if __name__ == "__main__":
