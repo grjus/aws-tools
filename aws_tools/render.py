@@ -8,6 +8,7 @@ from rich.table import Table
 
 from aws_tools.cloudformation import StackDetails, StackInventory
 from aws_tools.costs import CostDetails
+from aws_tools.iam import RoleSearchResult
 from aws_tools.models import Report
 
 
@@ -149,8 +150,11 @@ def render_stack_details(details: StackDetails, path: Path | None = None) -> Non
 
 
 def render_cost_details(details: CostDetails, path: Path | None = None) -> None:
+    label = "[bold]cost details[/bold]"
+    if details.stack_name:
+        label += f" for stack [bold]{details.stack_name}[/bold]"
     console.print(
-        f"[bold]cost details[/bold]: {details.current_start_date.isoformat()} "
+        f"{label}: {details.current_start_date.isoformat()} "
         f"through {details.as_of_date.isoformat()}"
     )
     if path is not None:
@@ -200,6 +204,32 @@ def render_cost_details(details: CostDetails, path: Path | None = None) -> None:
                 _format_money(service.estimated_month_end_amount, service.unit),
             )
         console.print(services)
+
+
+def render_role_search(result: RoleSearchResult) -> None:
+    console.print(
+        f"[bold]iam roles[/bold] matching [bold]{result.name_regex}[/bold]: "
+        f"{len(result.roles)}"
+    )
+    if not result.roles:
+        return
+
+    table = Table(show_lines=False)
+    table.add_column("Role")
+    table.add_column("Path")
+    table.add_column("Max session", justify="right")
+    table.add_column("Created")
+    table.add_column("ARN")
+
+    for role in result.roles:
+        table.add_row(
+            role.role_name,
+            role.path,
+            str(role.max_session_duration) if role.max_session_duration else "-",
+            role.created_at.isoformat(),
+            role.arn,
+        )
+    console.print(table)
 
 
 def _format_bool(value: bool | None) -> str:

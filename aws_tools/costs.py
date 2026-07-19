@@ -12,6 +12,7 @@ from aws_tools.aws import AwsContext, client
 
 TOOL = "cost-details"
 METRIC = "UnblendedCost"
+STACK_NAME_TAG_KEY = "aws:cloudformation:stack-name"
 
 
 class PastCostPeriod(BaseModel):
@@ -35,6 +36,7 @@ class CostDetails(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     profile: str | None = None
     account_ids: list[str] = Field(default_factory=list)
+    stack_name: str | None = None
     as_of_date: date
     current_start_date: date
     current_end_date_exclusive: date
@@ -56,6 +58,7 @@ class CostDetails(BaseModel):
 def get_cost_details(
     context: AwsContext,
     past_months: int = 3,
+    stack_name: str | None = None,
     as_of: date | None = None,
 ) -> CostDetails:
     if past_months < 0:
@@ -68,8 +71,19 @@ def get_cost_details(
     days_in_month = monthrange(as_of.year, as_of.month)[1]
 
     cost_client = client(context, "ce", "us-east-1")
-    past_periods = _past_cost_periods(cost_client, month_start, past_months)
-    service_costs = _current_service_costs(cost_client, month_start, current_end)
+    cost_filter = _stack_cost_filter(stack_name)
+    past_periods = _past_cost_periods(
+        cost_client,
+        month_start,
+        past_months,
+        cost_filter,
+    )
+    service_costs = _current_service_costs(
+        cost_client,
+        month_start,
+        current_end,
+        cost_filter,
+    )
     current_amount = round(sum(item.current_amount for item in service_costs), 2)
     estimated_month_end = _project_month_end(
         current_amount,
@@ -81,6 +95,7 @@ def get_cost_details(
     return CostDetails(
         profile=context.profile,
         account_ids=[context.account_id],
+        stack_name=stack_name,
         as_of_date=as_of,
         current_start_date=month_start,
         current_end_date_exclusive=current_end,
@@ -99,6 +114,7 @@ def _past_cost_periods(
     cost_client,
     current_month_start: date,
     past_months: int,
+    cost_filter: dict | None = None,
 ) -> list[PastCostPeriod]:
     if past_months == 0:
         return []
@@ -108,6 +124,7 @@ def _past_cost_periods(
         start,
         current_month_start,
         granularity="MONTHLY",
+        cost_filter=cost_filter,
     )
     periods: list[PastCostPeriod] = []
     for result in results:
@@ -127,6 +144,7 @@ def _current_service_costs(
     cost_client,
     start: date,
     end: date,
+    cost_filter: dict | None = None,
 ) -> list[ServiceCostEstimate]:
     days_elapsed = max((end - start).days, 1)
     days_in_month = monthrange(start.year, start.month)[1]
@@ -137,6 +155,7 @@ def _current_service_costs(
         end,
         granularity="MONTHLY",
         group_by=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+        cost_filter=cost_filter,
     )
     for result in results:
         for group in result.get("Groups", []):
@@ -177,6 +196,7 @@ def _get_cost_and_usage(
     end: date,
     granularity: str,
     group_by: list[dict[str, str]] | None = None,
+    cost_filter: dict | None = None,
 ) -> list[dict]:
     request = {
         "TimePeriod": {
@@ -186,6 +206,8 @@ def _get_cost_and_usage(
         "Granularity": granularity,
         "Metrics": [METRIC],
     }
+    if cost_filter:
+        request["Filter"] = cost_filter
     if group_by:
         request["GroupBy"] = group_by
 
@@ -203,6 +225,17 @@ def _project_month_end(amount: float, days_elapsed: int, days_in_month: int) -> 
     if amount <= 0:
         return 0.0
     return round((amount / days_elapsed) * days_in_month, 2)
+
+
+def _stack_cost_filter(stack_name: str | None) -> dict | None:
+    if not stack_name:
+        return None
+    return {
+        "Tags": {
+            "Key": STACK_NAME_TAG_KEY,
+            "Values": [stack_name],
+        }
+    }
 
 
 def _add_months(value: date, months: int) -> date:

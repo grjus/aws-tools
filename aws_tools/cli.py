@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
+import shlex
 from pathlib import Path
 
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from rich.console import Console
 
 from aws_tools.aws import create_context
@@ -12,9 +15,11 @@ from aws_tools.cloudformation import deployed_stack_inventory, stack_details
 from aws_tools.config import load_config
 from aws_tools.costs import get_cost_details
 from aws_tools.filtering import apply_report_filters
+from aws_tools.iam import assume_role, list_roles_matching
 from aws_tools.logs_tail import LogTailError, resolve_log_group, tail_log_group
 from aws_tools.render import (
     render_cost_details,
+    render_role_search,
     render_report,
     render_stack_details,
     render_stack_inventory,
@@ -34,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         return args.handler(args)
-    except (BotoCoreError, ClientError) as exc:
+    except (BotoCoreError, ClientError, ParamValidationError) as exc:
         console.print(f"[red]AWS request failed:[/red] {exc}")
         return 2
 
@@ -62,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_cost_command(subparsers)
     _add_stacks_command(subparsers)
     _add_logs_command(subparsers)
+    _add_roles_command(subparsers)
     _add_cleanup_command(subparsers)
     _add_roadmap_command(subparsers)
     return parser
@@ -121,6 +127,43 @@ def _add_logs_command(subparsers) -> None:
     tail.set_defaults(handler=_handle_logs_tail)
 
 
+def _add_roles_command(subparsers) -> None:
+    parser = subparsers.add_parser("roles")
+    nested = parser.add_subparsers(dest="action")
+    list_parser = nested.add_parser("list")
+    list_parser.add_argument(
+        "name_regex",
+        nargs="?",
+        default=".*",
+        type=_regex,
+        help="Python regex matched against IAM role names. Default: .*",
+    )
+    list_parser.set_defaults(handler=_handle_roles_list)
+
+    assume_parser = nested.add_parser("assume")
+    assume_parser.add_argument("role_arn", help="IAM role ARN to assume.")
+    assume_parser.add_argument(
+        "--session-name",
+        default="aws-tools-assume-role",
+        help="STS role session name. Default: aws-tools-assume-role.",
+    )
+    assume_parser.add_argument(
+        "--duration-seconds",
+        type=_positive_int,
+        help="Requested STS session duration in seconds.",
+    )
+    assume_parser.add_argument(
+        "--format",
+        choices=["env", "json"],
+        default="env",
+        help="Output format. Default: env.",
+    )
+    assume_parser.set_defaults(handler=_handle_roles_assume)
+
+    deactivate_parser = nested.add_parser("deactivate")
+    deactivate_parser.set_defaults(handler=_handle_roles_deactivate)
+
+
 def _handle_logs_tail(args) -> int:
     config, context = _context(args)
     regions = [args.region] if args.region else None
@@ -136,6 +179,50 @@ def _handle_logs_tail(args) -> int:
         interval=args.interval,
         lookback_seconds=args.lookback,
     )
+
+
+def _handle_roles_list(args) -> int:
+    _, context = _context(args, require_regions=False)
+    result = list_roles_matching(context, args.name_regex)
+    render_role_search(result)
+    return 0
+
+
+def _handle_roles_assume(args) -> int:
+    _, context = _context(
+        args,
+        assume_read_only_role=False,
+        require_regions=False,
+    )
+    credentials = assume_role(
+        context,
+        role_arn=args.role_arn,
+        session_name=args.session_name,
+        duration_seconds=args.duration_seconds,
+    )
+    if args.format == "json":
+        console.out(
+            json.dumps(
+                {
+                    "AccessKeyId": credentials.access_key_id,
+                    "SecretAccessKey": credentials.secret_access_key,
+                    "SessionToken": credentials.session_token,
+                    "Expiration": credentials.expiration.isoformat(),
+                    "RoleArn": credentials.role_arn,
+                    "RoleSessionName": credentials.session_name,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    console.out(_format_credentials_env(credentials))
+    return 0
+
+
+def _handle_roles_deactivate(args) -> int:
+    del args
+    console.out(_format_deactivate_env())
+    return 0
 
 
 def _add_cleanup_command(subparsers) -> None:
@@ -165,6 +252,13 @@ def _add_cost_command(subparsers) -> None:
         type=_non_negative_int,
         default=3,
         help="Number of completed months to include before the current month.",
+    )
+    details.add_argument(
+        "--stack-name",
+        help=(
+            "Filter costs to resources tagged with the CloudFormation stack name. "
+            "Requires the stack-name cost allocation tag in Cost Explorer."
+        ),
     )
     details.add_argument(
         "--output",
@@ -229,7 +323,11 @@ def _handle_tag_scan(args) -> int:
 
 def _handle_cost_details(args) -> int:
     _, context = _context(args)
-    details = get_cost_details(context, past_months=args.past_months)
+    details = get_cost_details(
+        context,
+        past_months=args.past_months,
+        stack_name=args.stack_name,
+    )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(details.model_dump_json(indent=2), encoding="utf-8")
@@ -312,7 +410,11 @@ def _finish_scan(config, report, args) -> int:
     return 0
 
 
-def _context(args, assume_read_only_role: bool = True):
+def _context(
+    args,
+    assume_read_only_role: bool = True,
+    require_regions: bool = True,
+):
     regions = None
     if args.regions:
         regions = [
@@ -326,6 +428,7 @@ def _context(args, assume_read_only_role: bool = True):
     return config, create_context(
         config,
         assume_read_only_role=assume_read_only_role,
+        require_regions=require_regions,
     )
 
 
@@ -341,6 +444,41 @@ def _positive_float(value: str) -> float:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
     return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def _regex(value: str) -> str:
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise argparse.ArgumentTypeError(f"invalid regex: {exc}") from exc
+    return value
+
+
+def _format_credentials_env(credentials) -> str:
+    lines = [
+        f"export AWS_ACCESS_KEY_ID={shlex.quote(credentials.access_key_id)}",
+        f"export AWS_SECRET_ACCESS_KEY={shlex.quote(credentials.secret_access_key)}",
+        f"export AWS_SESSION_TOKEN={shlex.quote(credentials.session_token)}",
+        f"# Expires: {credentials.expiration.isoformat()}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_deactivate_env() -> str:
+    return "\n".join(
+        [
+            "unset AWS_ACCESS_KEY_ID",
+            "unset AWS_SECRET_ACCESS_KEY",
+            "unset AWS_SESSION_TOKEN",
+        ]
+    )
 
 
 if __name__ == "__main__":
