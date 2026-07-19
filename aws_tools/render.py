@@ -4,6 +4,7 @@ from collections import Counter
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from aws_tools.cloudformation import StackDetails, StackInventory
@@ -152,7 +153,7 @@ def render_stack_details(details: StackDetails, path: Path | None = None) -> Non
 def render_cost_details(details: CostDetails, path: Path | None = None) -> None:
     label = "[bold]cost details[/bold]"
     if details.stack_name:
-        label += f" for stack [bold]{details.stack_name}[/bold]"
+        label += f" for stack [bold]{escape(details.stack_name)}[/bold]"
     console.print(
         f"{label}: {details.current_start_date.isoformat()} "
         f"through {details.as_of_date.isoformat()}"
@@ -208,7 +209,7 @@ def render_cost_details(details: CostDetails, path: Path | None = None) -> None:
 
 def render_role_search(result: RoleSearchResult) -> None:
     console.print(
-        f"[bold]iam roles[/bold] matching [bold]{result.name_regex}[/bold]: "
+        f"[bold]iam roles[/bold] matching [bold]{escape(result.name_regex)}[/bold]: "
         f"{len(result.roles)}"
     )
     if not result.roles:

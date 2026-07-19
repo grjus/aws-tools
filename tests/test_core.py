@@ -1,3 +1,4 @@
+import io
 from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,6 +7,7 @@ from unittest.mock import patch
 
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
+from rich.console import Console
 
 from aws_tools.aws import AwsContext, assume_role_credentials, create_context
 from aws_tools.cloudformation import (
@@ -16,7 +18,7 @@ from aws_tools.cloudformation import (
 from aws_tools.cleanup import CleanupError, apply_findings
 from aws_tools.cli import _format_deactivate_env
 from aws_tools.config import AppConfig, ExclusionRule, load_config
-from aws_tools import costs, iam
+from aws_tools import costs, iam, render
 from aws_tools.filtering import apply_report_filters, parse_filters
 from aws_tools.models import CleanupAction, Finding, Report, stable_finding_id
 from aws_tools.reports import load_report
@@ -431,6 +433,45 @@ class CoreContractTest(unittest.TestCase):
                 ]
             ),
         )
+
+    def test_render_cost_details_escapes_stack_name_markup(self):
+        output = io.StringIO()
+        details = costs.CostDetails(
+            stack_name="app[prod]",
+            as_of_date=date(2024, 3, 10),
+            current_start_date=date(2024, 3, 1),
+            current_end_date_exclusive=date(2024, 3, 11),
+            days_elapsed=10,
+            days_in_month=31,
+            current_amount=1.0,
+            estimated_remaining_amount=2.0,
+            estimated_month_end_amount=3.0,
+        )
+
+        with patch.object(
+            render,
+            "console",
+            Console(file=output, force_terminal=False, color_system=None),
+        ):
+            render.render_cost_details(details)
+
+        self.assertIn("app[prod]", output.getvalue())
+
+    def test_render_role_search_escapes_regex_markup(self):
+        output = io.StringIO()
+        result = iam.RoleSearchResult(
+            name_regex="role[abc]",
+            account_id="123456789012",
+        )
+
+        with patch.object(
+            render,
+            "console",
+            Console(file=output, force_terminal=False, color_system=None),
+        ):
+            render.render_role_search(result)
+
+        self.assertIn("role[abc]", output.getvalue())
 
     def test_s3_stack_owned_bucket_is_not_orphaned(self):
         context = AwsContext(
