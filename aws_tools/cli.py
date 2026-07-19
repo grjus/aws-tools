@@ -12,6 +12,7 @@ from aws_tools.cloudformation import deployed_stack_inventory, stack_details
 from aws_tools.config import load_config
 from aws_tools.costs import get_cost_details
 from aws_tools.filtering import apply_report_filters
+from aws_tools.logs_tail import LogTailError, resolve_log_group, tail_log_group
 from aws_tools.render import (
     render_cost_details,
     render_report,
@@ -60,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scan_command(subparsers, "tag-compliance", _handle_tag_scan)
     _add_cost_command(subparsers)
     _add_stacks_command(subparsers)
+    _add_logs_command(subparsers)
     _add_cleanup_command(subparsers)
     _add_roadmap_command(subparsers)
     return parser
@@ -90,6 +92,50 @@ def _add_scan_command(subparsers, name: str, handler) -> None:
             help="Include resources classified as managed or excluded.",
         )
     scan.set_defaults(handler=handler)
+
+
+def _add_logs_command(subparsers) -> None:
+    parser = subparsers.add_parser("logs")
+    nested = parser.add_subparsers(dest="action")
+    tail = nested.add_parser("tail")
+    tail.add_argument(
+        "partial_name",
+        help="Partial log group name (substring match).",
+    )
+    tail.add_argument(
+        "--interval",
+        type=_positive_float,
+        default=5.0,
+        help="Refresh interval in seconds between polls. Default: 5.",
+    )
+    tail.add_argument(
+        "--lookback",
+        type=_non_negative_int,
+        default=60,
+        help="Initial lookback window in seconds. Default: 60.",
+    )
+    tail.add_argument(
+        "--region",
+        help="Restrict log group search to a single AWS region.",
+    )
+    tail.set_defaults(handler=_handle_logs_tail)
+
+
+def _handle_logs_tail(args) -> int:
+    config, context = _context(args)
+    regions = [args.region] if args.region else None
+    try:
+        region, log_group_name = resolve_log_group(context, args.partial_name, regions)
+    except LogTailError as exc:
+        console.print(f"[red]Log tail error:[/red] {exc}")
+        return 2
+    return tail_log_group(
+        context,
+        log_group_name,
+        region,
+        interval=args.interval,
+        lookback_seconds=args.lookback,
+    )
 
 
 def _add_cleanup_command(subparsers) -> None:
@@ -287,6 +333,13 @@ def _non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be 0 or greater")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
     return parsed
 
 

@@ -46,6 +46,9 @@ aws-tools stacks list
 aws-tools stacks list --output .aws-tools/reports/stacks.json
 aws-tools stacks details <stack-name>
 aws-tools stacks details <stack-name> --regions eu-west-1 --output .aws-tools/reports/stack-details.json
+aws-tools logs tail <partial-log-name>
+aws-tools logs tail <partial-log-name> --interval 2
+aws-tools logs tail <partial-log-name> --lookback 300 --region eu-west-1
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id>
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids ALL
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id> --execute
@@ -100,6 +103,16 @@ logical ID, physical ID, type, status, last update time, and drift status. The
 command searches the configured regions; pass `--regions <region>` to narrow
 the lookup. Use `--output` to save the detailed JSON. Parameter values are
 intentionally omitted from the details output.
+
+Use `aws-tools logs tail <partial-log-name>` to live-tail a CloudWatch log
+group. `<partial-log-name>` is matched as a substring against every log group
+in the configured regions. If exactly one log group matches, the tool streams
+`filter_log_events` output to the console. If zero or more than one log group
+matches, it returns an error and lists the candidates so you can narrow the
+partial name or pass `--region <region>`. `--interval <seconds>` sets the
+refresh interval between polls (default 5). `--lookback <seconds>` sets the
+initial history window pulled on the first poll (default 60). Press Ctrl+C to
+stop the tail. The tail uses the read-only role when configured.
 
 ## Orphaned resource coverage
 
