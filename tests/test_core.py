@@ -1,3 +1,4 @@
+import io
 from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,16 +7,18 @@ from unittest.mock import patch
 
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
+from rich.console import Console
 
-from aws_tools.aws import AwsContext, create_context
+from aws_tools.aws import AwsContext, assume_role_credentials, create_context
 from aws_tools.cloudformation import (
     StackOwnership,
     deployed_stack_inventory,
     stack_details,
 )
 from aws_tools.cleanup import CleanupError, apply_findings
+from aws_tools.cli import _format_deactivate_env
 from aws_tools.config import AppConfig, ExclusionRule, load_config
-from aws_tools import costs
+from aws_tools import costs, iam, render
 from aws_tools.filtering import apply_report_filters, parse_filters
 from aws_tools.models import CleanupAction, Finding, Report, stable_finding_id
 from aws_tools.reports import load_report
@@ -360,6 +363,116 @@ class CoreContractTest(unittest.TestCase):
             "arn:aws:iam::123:role/ReadOnly",
         )
 
+    def test_list_roles_matching_uses_regex(self):
+        context = AwsContext(
+            session=None,
+            account_id="123456789012",
+            profile="dev",
+            regions=[],
+        )
+
+        with patch("aws_tools.iam.aws_client", return_value=FakeIamClient()):
+            result = iam.list_roles_matching(context, "(ReadOnly|app)")
+
+        self.assertEqual(
+            [role.role_name for role in result.roles],
+            ["app-deploy", "ReadOnlyAdmin"],
+        )
+        self.assertEqual(
+            result.roles[0].arn,
+            "arn:aws:iam::123456789012:role/app-deploy",
+        )
+
+    def test_list_roles_matching_default_lists_all_roles(self):
+        context = AwsContext(
+            session=None,
+            account_id="123456789012",
+            profile="dev",
+            regions=[],
+        )
+
+        with patch("aws_tools.iam.aws_client", return_value=FakeIamClient()):
+            result = iam.list_roles_matching(context, ".*")
+
+        self.assertEqual(
+            [role.role_name for role in result.roles],
+            ["app-deploy", "BillingAudit", "ReadOnlyAdmin"],
+        )
+
+    def test_assume_role_credentials_requests_role_arn(self):
+        session = FakeAssumeRoleSession()
+
+        credentials = assume_role_credentials(
+            source_session=session,
+            role_arn="arn:aws:iam::123456789012:role/app-deploy",
+            session_name="test-session",
+            duration_seconds=1800,
+        )
+
+        self.assertEqual(
+            session.sts.request,
+            {
+                "RoleArn": "arn:aws:iam::123456789012:role/app-deploy",
+                "RoleSessionName": "test-session",
+                "DurationSeconds": 1800,
+            },
+        )
+        self.assertEqual(credentials.access_key_id, "access")
+        self.assertEqual(
+            credentials.role_arn, "arn:aws:iam::123456789012:role/app-deploy"
+        )
+
+    def test_deactivate_role_assumption_prints_unset_commands(self):
+        self.assertEqual(
+            _format_deactivate_env(),
+            "\n".join(
+                [
+                    "unset AWS_ACCESS_KEY_ID",
+                    "unset AWS_SECRET_ACCESS_KEY",
+                    "unset AWS_SESSION_TOKEN",
+                ]
+            ),
+        )
+
+    def test_render_cost_details_escapes_stack_name_markup(self):
+        output = io.StringIO()
+        details = costs.CostDetails(
+            stack_name="app[prod]",
+            as_of_date=date(2024, 3, 10),
+            current_start_date=date(2024, 3, 1),
+            current_end_date_exclusive=date(2024, 3, 11),
+            days_elapsed=10,
+            days_in_month=31,
+            current_amount=1.0,
+            estimated_remaining_amount=2.0,
+            estimated_month_end_amount=3.0,
+        )
+
+        with patch.object(
+            render,
+            "console",
+            Console(file=output, force_terminal=False, color_system=None),
+        ):
+            render.render_cost_details(details)
+
+        self.assertIn("app[prod]", output.getvalue())
+
+    def test_render_role_search_escapes_regex_markup(self):
+        output = io.StringIO()
+        result = iam.RoleSearchResult(
+            name_regex="role[abc]",
+            account_id="123456789012",
+        )
+
+        with patch.object(
+            render,
+            "console",
+            Console(file=output, force_terminal=False, color_system=None),
+        ):
+            render.render_role_search(result)
+
+        self.assertIn("role[abc]", output.getvalue())
+
     def test_s3_stack_owned_bucket_is_not_orphaned(self):
         context = AwsContext(
             session=None,
@@ -607,6 +720,26 @@ class CoreContractTest(unittest.TestCase):
         self.assertEqual(cost_client.requests[1]["TimePeriod"]["Start"], "2024-03-01")
         self.assertEqual(cost_client.requests[1]["TimePeriod"]["End"], "2024-03-11")
 
+    def test_cost_details_filters_by_cloudformation_stack_name(self):
+        cost_client = FakeCostExplorerClient()
+        with patch("aws_tools.costs.client", return_value=cost_client):
+            details = costs.get_cost_details(
+                _context(),
+                past_months=1,
+                stack_name="app-stack",
+                as_of=date(2024, 3, 10),
+            )
+
+        expected_filter = {
+            "Tags": {
+                "Key": "aws:cloudformation:stack-name",
+                "Values": ["app-stack"],
+            }
+        }
+        self.assertEqual(details.stack_name, "app-stack")
+        self.assertEqual(cost_client.requests[0]["Filter"], expected_filter)
+        self.assertEqual(cost_client.requests[1]["Filter"], expected_filter)
+
 
 def _logs_finding() -> Finding:
     return Finding(
@@ -798,12 +931,97 @@ class FakeStsClient:
                 "AccessKeyId": "access",
                 "SecretAccessKey": "secret",
                 "SessionToken": "token",
+                "Expiration": datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
             }
         }
 
     def get_caller_identity(self):
         account = "999999999999" if self.assumed else "123456789012"
         return {"Account": account}
+
+
+class FakeIamClient:
+    def get_paginator(self, operation_name):
+        if operation_name != "list_roles":
+            raise AssertionError(f"Unexpected paginator: {operation_name}")
+        return FakeIamRolesPaginator()
+
+
+class FakeIamRolesPaginator:
+    def paginate(self):
+        return [
+            {
+                "Roles": [
+                    {
+                        "RoleName": "ReadOnlyAdmin",
+                        "Arn": "arn:aws:iam::123456789012:role/ReadOnlyAdmin",
+                        "Path": "/",
+                        "CreateDate": datetime(
+                            2024,
+                            1,
+                            2,
+                            3,
+                            4,
+                            tzinfo=timezone.utc,
+                        ),
+                        "MaxSessionDuration": 3600,
+                    },
+                    {
+                        "RoleName": "BillingAudit",
+                        "Arn": "arn:aws:iam::123456789012:role/BillingAudit",
+                        "Path": "/",
+                        "CreateDate": datetime(
+                            2024,
+                            1,
+                            3,
+                            3,
+                            4,
+                            tzinfo=timezone.utc,
+                        ),
+                    },
+                    {
+                        "RoleName": "app-deploy",
+                        "Arn": "arn:aws:iam::123456789012:role/app-deploy",
+                        "Path": "/service/",
+                        "CreateDate": datetime(
+                            2024,
+                            1,
+                            4,
+                            3,
+                            4,
+                            tzinfo=timezone.utc,
+                        ),
+                    },
+                ]
+            }
+        ]
+
+
+class FakeAssumeRoleSession:
+    def __init__(self):
+        self.region_name = "eu-west-1"
+        self.sts = FakeAssumeRoleClient()
+
+    def client(self, service):
+        if service != "sts":
+            raise AssertionError(f"Unexpected client: {service}")
+        return self.sts
+
+
+class FakeAssumeRoleClient:
+    def __init__(self):
+        self.request = None
+
+    def assume_role(self, **kwargs):
+        self.request = kwargs
+        return {
+            "Credentials": {
+                "AccessKeyId": "access",
+                "SecretAccessKey": "secret",
+                "SessionToken": "token",
+                "Expiration": datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
+            }
+        }
 
 
 class FakeS3Client:

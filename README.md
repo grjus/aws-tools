@@ -39,6 +39,7 @@ aws-tools orphaned scan --include-managed
 aws-tools logs-retention scan
 aws-tools cost-risk scan
 aws-tools cost details
+aws-tools cost details --stack-name <stack-name>
 aws-tools cost details --past-months 6
 aws-tools cost details --output .aws-tools/reports/cost-details.json
 aws-tools tag-compliance scan
@@ -49,6 +50,11 @@ aws-tools stacks details <stack-name> --regions eu-west-1 --output .aws-tools/re
 aws-tools logs tail <partial-log-name>
 aws-tools logs tail <partial-log-name> --interval 2
 aws-tools logs tail <partial-log-name> --lookback 300 --region eu-west-1
+aws-tools roles list
+aws-tools roles list 'ReadOnly|Admin'
+aws-tools roles assume arn:aws:iam::123456789012:role/Admin
+aws-tools roles assume arn:aws:iam::123456789012:role/Admin --format json
+aws-tools roles deactivate
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id>
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids ALL
 aws-tools cleanup apply --report .aws-tools/reports/<report>.json --ids <id> --execute
@@ -78,6 +84,10 @@ completed past monthly costs, current month-to-date cost, an estimate for the
 rest of the current month, and current plus estimated month-end cost per
 service. Cost Explorer is queried in `us-east-1`, which is the AWS billing API
 endpoint region, regardless of the configured resource scan regions.
+Pass `--stack-name <stack-name>` to filter costs to resources tagged with the
+CloudFormation-generated `aws:cloudformation:stack-name` tag. AWS only includes
+that filter in Cost Explorer when the tag is active as a cost allocation tag,
+and the result only covers resources whose costs are tagged that way.
 
 When `AWS_READ_ONLY_ROLE_ARN`, `read_only_role_arn`, or
 `--read-only-role-arn` is set, scan commands assume that role before reading
@@ -113,6 +123,16 @@ partial name or pass `--region <region>`. `--interval <seconds>` sets the
 refresh interval between polls (default 5). `--lookback <seconds>` sets the
 initial history window pulled on the first poll (default 60). Press Ctrl+C to
 stop the tail. The tail uses the read-only role when configured.
+
+Use `aws-tools roles list [regex]` to list IAM roles whose role names match a
+Python regular expression. Omit `[regex]` to list every role. IAM roles are
+global, so this command does not require configured scan regions. Use
+`aws-tools roles assume <role-arn>` to request STS credentials for an explicit
+role ARN. By default, it prints shell `export` commands; pass `--format json`
+for structured output. The command uses the base profile credentials instead of
+chaining through the configured read-only role. Use
+`aws-tools roles deactivate` to print the shell `unset` commands for clearing
+assumed role credentials from the current shell.
 
 ## Orphaned resource coverage
 
