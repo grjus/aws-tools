@@ -38,6 +38,9 @@ aws-tools orphaned scan --filter s3,cloudfront
 aws-tools orphaned scan --include-managed
 aws-tools logs-retention scan
 aws-tools cost-risk scan
+aws-tools cost details
+aws-tools cost details --past-months 6
+aws-tools cost details --output .aws-tools/reports/cost-details.json
 aws-tools tag-compliance scan
 aws-tools stacks list
 aws-tools stacks list --output .aws-tools/reports/stacks.json
@@ -66,6 +69,12 @@ object versions or delete markers.
 Use `--filter` on scan commands to keep only services you care about in the
 console output and saved JSON report. A filter can be a service such as `logs`,
 or `service:resource-type` such as `cloudfront:distribution`.
+
+Use `aws-tools cost details` to check AWS Cost Explorer totals. It shows
+completed past monthly costs, current month-to-date cost, an estimate for the
+rest of the current month, and current plus estimated month-end cost per
+service. Cost Explorer is queried in `us-east-1`, which is the AWS billing API
+endpoint region, regardless of the configured resource scan regions.
 
 When `AWS_READ_ONLY_ROLE_ARN`, `read_only_role_arn`, or
 `--read-only-role-arn` is set, scan commands assume that role before reading

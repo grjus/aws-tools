@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -15,6 +15,7 @@ from aws_tools.cloudformation import (
 )
 from aws_tools.cleanup import CleanupError, apply_findings
 from aws_tools.config import AppConfig, ExclusionRule, load_config
+from aws_tools import costs
 from aws_tools.filtering import apply_report_filters, parse_filters
 from aws_tools.models import CleanupAction, Finding, Report, stable_finding_id
 from aws_tools.reports import load_report
@@ -577,6 +578,35 @@ class CoreContractTest(unittest.TestCase):
         self.assertEqual(resources[0].drift_status, "IN_SYNC")
         self.assertNotIn("super-secret", details.model_dump_json())
 
+    def test_cost_details_projects_current_month_by_service(self):
+        cost_client = FakeCostExplorerClient()
+        with patch("aws_tools.costs.client", return_value=cost_client):
+            details = costs.get_cost_details(
+                _context(),
+                past_months=2,
+                as_of=date(2024, 3, 10),
+            )
+
+        self.assertEqual(details.current_start_date, date(2024, 3, 1))
+        self.assertEqual(details.current_end_date_exclusive, date(2024, 3, 11))
+        self.assertEqual(details.days_elapsed, 10)
+        self.assertEqual(details.days_in_month, 31)
+        self.assertEqual(
+            [period.amount for period in details.past_periods],
+            [100.0, 80.0],
+        )
+        self.assertEqual(details.current_amount, 40.0)
+        self.assertEqual(details.estimated_month_end_amount, 124.0)
+        self.assertEqual(details.estimated_remaining_amount, 84.0)
+        self.assertEqual(details.services[0].service, "Amazon Elastic Compute Cloud")
+        self.assertEqual(details.services[0].estimated_month_end_amount, 93.0)
+        self.assertEqual(details.services[1].service, "Amazon Simple Storage Service")
+        self.assertEqual(details.services[1].estimated_month_end_amount, 31.0)
+        self.assertEqual(cost_client.requests[0]["TimePeriod"]["Start"], "2024-01-01")
+        self.assertEqual(cost_client.requests[0]["TimePeriod"]["End"], "2024-03-01")
+        self.assertEqual(cost_client.requests[1]["TimePeriod"]["Start"], "2024-03-01")
+        self.assertEqual(cost_client.requests[1]["TimePeriod"]["End"], "2024-03-11")
+
 
 def _logs_finding() -> Finding:
     return Finding(
@@ -1002,6 +1032,67 @@ class FakeCloudFormationClient:
                     "Outputs": [{"OutputKey": "ApiUrl", "OutputValue": "https://x"}],
                     "Tags": [{"Key": "Environment", "Value": "prod"}],
                 }
+            ]
+        }
+
+
+class FakeCostExplorerClient:
+    def __init__(self):
+        self.requests = []
+
+    def get_cost_and_usage(self, **kwargs):
+        self.requests.append(kwargs)
+        if "GroupBy" in kwargs:
+            return {
+                "ResultsByTime": [
+                    {
+                        "TimePeriod": {
+                            "Start": "2024-03-01",
+                            "End": "2024-03-11",
+                        },
+                        "Groups": [
+                            {
+                                "Keys": ["Amazon Elastic Compute Cloud"],
+                                "Metrics": {
+                                    "UnblendedCost": {
+                                        "Amount": "30.0",
+                                        "Unit": "USD",
+                                    }
+                                },
+                            },
+                            {
+                                "Keys": ["Amazon Simple Storage Service"],
+                                "Metrics": {
+                                    "UnblendedCost": {
+                                        "Amount": "10.0",
+                                        "Unit": "USD",
+                                    }
+                                },
+                            },
+                        ],
+                    }
+                ]
+            }
+        return {
+            "ResultsByTime": [
+                {
+                    "TimePeriod": {"Start": "2024-01-01", "End": "2024-02-01"},
+                    "Total": {
+                        "UnblendedCost": {
+                            "Amount": "100.0",
+                            "Unit": "USD",
+                        }
+                    },
+                },
+                {
+                    "TimePeriod": {"Start": "2024-02-01", "End": "2024-03-01"},
+                    "Total": {
+                        "UnblendedCost": {
+                            "Amount": "80.0",
+                            "Unit": "USD",
+                        }
+                    },
+                },
             ]
         }
 
